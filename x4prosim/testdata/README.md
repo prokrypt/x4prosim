@@ -48,7 +48,7 @@ python3 -c "import csv; r=list(csv.DictReader(open('x4prosim/testdata/sdcard/deb
 
 ## 3. Measured power (reference)
 
-The sim does not model current. Measured on the device (2000 mAh pack), mA:
+The sim does not model current. Measured on the device (1100 mAh pack), mA:
 
 | State | mA |
 | --- | --- |
