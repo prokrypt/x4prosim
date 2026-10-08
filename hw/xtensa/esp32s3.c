@@ -297,6 +297,16 @@ static void esp32s3_machine_init_psram(Esp32s3SocState *ms, uint32_t size_mbytes
                                 qdev_get_gpio_in_named(psram, SSI_GPIO_CS, 0));
 }
 
+/* x4prosim: board I2C device with a stable QOM path (/machine/soc/<type>) */
+static void esp32s3_add_i2c_slave(Esp32s3SocState *ss, I2CBus *bus,
+                                  const char *type, uint8_t addr)
+{
+    I2CSlave *dev = i2c_slave_new(type, addr);
+
+    object_property_add_child(OBJECT(ss), type, OBJECT(dev));
+    i2c_slave_realize_and_unref(dev, bus, &error_fatal);
+}
+
 static void esp32s3_machine_init_sd(Esp32s3SocState* ss)
 {
     DriveInfo *dinfo = drive_get(IF_SD, 0, 0);
@@ -884,6 +894,8 @@ static void esp32s3_machine_init(MachineState *machine)
     /* x4prosim: I2C0/I2C1. The X4 Pro's board devices sit on I2C0 (SDA 39, SCL 38). */
     {
         static const hwaddr i2c_base[] = { DR_REG_I2C_EXT_BASE, DR_REG_I2C1_EXT_BASE };
+        I2CBus *i2c_bus[ARRAY_SIZE(i2c_base)];
+
         for (int i = 0; i < ARRAY_SIZE(i2c_base); i++) {
             DeviceState *i2c = qdev_new("esp32s3.i2c");
             g_autofree char *name = g_strdup_printf("i2c%d", i);
@@ -894,7 +906,9 @@ static void esp32s3_machine_init(MachineState *machine)
                                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(i2c), 0), 1);
             sysbus_connect_irq(SYS_BUS_DEVICE(i2c), 0,
                                qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT0_INTR_SOURCE + i));
+            i2c_bus[i] = I2C_BUS(qdev_get_child_bus(i2c, "i2c"));
         }
+        esp32s3_add_i2c_slave(ss, i2c_bus[0], "bm8563", 0x51);
     }
 
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.rmt", DR_REG_RMT_BASE, 0x1000);
