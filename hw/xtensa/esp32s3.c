@@ -909,6 +909,7 @@ static void esp32s3_machine_init(MachineState *machine)
             i2c_bus[i] = I2C_BUS(qdev_get_child_bus(i2c, "i2c"));
         }
         esp32s3_add_i2c_slave(ss, i2c_bus[0], "bm8563", 0x51);
+        esp32s3_add_i2c_slave(ss, i2c_bus[0], "cw2017", 0x63);
     }
 
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.rmt", DR_REG_RMT_BASE, 0x1000);

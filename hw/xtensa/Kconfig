@@ -45,5 +45,6 @@ config XTENSA_ESP32S3
     select TMP105
     select ESP_RGB
     select BM8563
+    select CW2017
 
 
