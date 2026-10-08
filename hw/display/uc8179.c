@@ -12,9 +12,11 @@
  * device; the waveform bodies, which were not dumped, read as 0x00.
  *
  * Models DTM1 (0x10, old plane) and DTM2 (0x13, new plane) and display
- * refresh (0x12), which holds BUSY_N low for "busy-ms" and then simulates the
- * ink (KW mode, plane bit 1 = white). Each refresh is a list of frames giving
- * the drive per pixel class (OLD/NEW bits):
+ * refresh (0x12), which simulates the ink (KW mode, plane bit 1 = white). A
+ * refresh is a list of frames giving the drive per pixel class (OLD/NEW
+ * bits), played one per "frame-us" of virtual time so flashes and paints
+ * show ("animate"=false applies them at once). BUSY_N stays low for the
+ * frames' duration, or "busy-ms" if set.
  *  - PSR (0x00) REG=1: the register LUTs (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23
  *    WK, 0x24 KK; 6-byte groups [levels, TP_A..TP_D, RP]); drive = source -
  *    VCOM, VDH -> black, VDL -> white. VDHR (11) on a source row is not modeled.
@@ -94,7 +96,11 @@ struct Uc8179State {
     qemu_irq busy_n;
     qemu_irq sda_out;
     QEMUTimer busy_timer;
-    uint32_t busy_ms;
+    QEMUTimer anim_timer;
+    uint32_t busy_ms;       /* fixed DRF BUSY time; 0 = the frames' duration */
+    bool animate;
+    int anim_f, anim_n;     /* next frame to run, frames in the refresh */
+    double anim_t0;         /* virtual seconds the refresh started */
     bool portrait;
 
     bool dc;
@@ -295,7 +301,8 @@ static void uc8179_relax(Uc8179State *s, double now, bool leak)
     s->t_drift = now;
 }
 
-static void uc8179_refresh(Uc8179State *s)
+/* Runs refresh frame f over the whole panel. */
+static void uc8179_run_frame(Uc8179State *s, int f)
 {
     float dt = s->frame_us / 1e6f, step = 1.0f / s->swing;
     float sigma = s->rail_soft / 1000.0f, bloom = s->bloom / 1000.0f;
@@ -303,9 +310,68 @@ static void uc8179_refresh(Uc8179State *s)
     float ks = s->remnant_slow_ms ? expf(-dt * 1e3f / s->remnant_slow_ms) : 0;
     float gf = s->remnant_fast_ms ? s->remnant_fast * 1.0f / s->remnant_fast_ms : 0;
     float gs = s->remnant_slow_ms ? s->remnant_slow * 1.0f / s->remnant_slow_ms : 0;
-    double now = uc8179_now();
-    int n;
+    float t = s->anim_t0 + f * dt;
+    const float *e = s->frames[f];
+    bool edges = bloom && (e[0] != e[1] || e[0] != e[2] || e[0] != e[3]);
 
+    for (int y = 0; y < H; y++) {
+        const uint8_t *c = s->cls[y];
+        for (int x = 0; x < W; x++) {
+            Uc8179Ink *k = &s->ink[y * W + x];
+            float d = e[c[x]];
+            bool driven = fabsf(d) >= 0.5f;
+            if (edges && driven) {
+                float nb = 0;
+                nb += x > 0 ? e[c[x - 1]] - e[c[x]] : 0;
+                nb += x < W - 1 ? e[c[x + 1]] - e[c[x]] : 0;
+                nb += y > 0 ? e[s->cls[y - 1][x]] - e[c[x]] : 0;
+                nb += y < H - 1 ? e[s->cls[y + 1][x]] - e[c[x]] : 0;
+                d += bloom * nb;
+            }
+            /* field = fraction / tau * charge; per mille / ms = 1 / s */
+            float a = d - gf * k->qf - gs * k->qs;
+            k->qf = k->qf * kf + d * dt;
+            k->qs = k->qs * ks + d * dt;
+            if (a != 0) {
+                k->p = ink_move(k->p, a * step, sigma);
+            }
+            if (driven) {
+                k->t_drive = t;
+            }
+        }
+    }
+    s->redraw = true;
+}
+
+/* Runs the frames due by virtual time "now" (all of them if now < 0). */
+static void uc8179_run_frames(Uc8179State *s, double now)
+{
+    double dt = s->frame_us / 1e6;
+    int due = now < 0 ? s->anim_n : MIN(s->anim_n, (int)((now - s->anim_t0) / dt + 1e-6));
+
+    while (s->anim_f < due) {
+        uc8179_run_frame(s, s->anim_f++);
+    }
+    if (s->anim_f == s->anim_n) {
+        timer_del(&s->anim_timer);
+        s->t_refresh = s->t_drift = s->anim_t0 + s->anim_n * dt;
+    } else {
+        timer_mod(&s->anim_timer, (s->anim_t0 + (s->anim_f + 1) * dt) * 1e9);
+    }
+}
+
+static void uc8179_anim_tick(void *opaque)
+{
+    Uc8179State *s = opaque;
+    uc8179_run_frames(s, uc8179_now());
+}
+
+/* Starts a refresh; returns its duration in ms. */
+static uint32_t uc8179_refresh(Uc8179State *s)
+{
+    double now = uc8179_now();
+
+    uc8179_run_frames(s, -1);       /* a refresh still playing finishes first */
     uc8179_relax(s, now, now > s->t_refresh);
     /* The driver streams framebuffer row h-1-i into RAM row i. */
     for (int y = 0; y < H; y++) {
@@ -316,43 +382,14 @@ static void uc8179_refresh(Uc8179State *s)
             s->cls[y][x] = o << 1 | nw;
         }
     }
-    n = s->psr & PSR_REG ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
-
-    for (int f = 0; f < n; f++) {
-        const float *e = s->frames[f];
-        bool edges = bloom && (e[0] != e[1] || e[0] != e[2] || e[0] != e[3]);
-        for (int y = 0; y < H; y++) {
-            const uint8_t *c = s->cls[y];
-            for (int x = 0; x < W; x++) {
-                Uc8179Ink *k = &s->ink[y * W + x];
-                float d = e[c[x]];
-                bool driven = fabsf(d) >= 0.5f;
-                if (edges && driven) {
-                    float nb = 0;
-                    nb += x > 0 ? e[c[x - 1]] - e[c[x]] : 0;
-                    nb += x < W - 1 ? e[c[x + 1]] - e[c[x]] : 0;
-                    nb += y > 0 ? e[s->cls[y - 1][x]] - e[c[x]] : 0;
-                    nb += y < H - 1 ? e[s->cls[y + 1][x]] - e[c[x]] : 0;
-                    d += bloom * nb;
-                }
-                /* field = fraction / tau * charge; per mille / ms = 1 / s */
-                float a = d - gf * k->qf - gs * k->qs;
-                k->qf = k->qf * kf + d * dt;
-                k->qs = k->qs * ks + d * dt;
-                if (a != 0) {
-                    k->p = ink_move(k->p, a * step, sigma);
-                }
-                if (driven) {
-                    k->t_drive = now;
-                }
-            }
-        }
-    }
-    s->t_refresh = s->t_drift = now + n * dt;
+    s->anim_n = s->psr & PSR_REG ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
+    s->anim_f = 0;
+    s->anim_t0 = now;
     if (s->cdi & CDI_N2OCP) {
         memcpy(s->ram[PLANE_OLD], s->ram[PLANE_NEW], sizeof(s->ram[PLANE_NEW]));
     }
-    s->redraw = true;
+    uc8179_run_frames(s, s->animate ? now : -1);
+    return MAX(1, (uint64_t)s->anim_n * s->frame_us / 1000);
 }
 
 static void uc8179_command(Uc8179State *s, uint8_t c)
@@ -369,10 +406,11 @@ static void uc8179_command(Uc8179State *s, uint8_t c)
         break;
     case 0x07:  /* DSLP; the check code 0xA5 follows as data */
         break;
-    case 0x12:  /* DRF */
-        uc8179_refresh(s);
-        uc8179_set_busy(s, s->busy_ms);
+    case 0x12: {    /* DRF */
+        uint32_t ms = uc8179_refresh(s);
+        uc8179_set_busy(s, s->busy_ms ? s->busy_ms : ms);
         break;
+    }
     case 0x91:  /* PTIN */
         s->partial = true;
         break;
@@ -531,6 +569,9 @@ static void uc8179_set_rst(void *opaque, int n, int level)
     Uc8179State *s = UC8179(opaque);
     if (!level) {
         s->in_reset = true;
+        /* the panel stops being driven mid-refresh */
+        timer_del(&s->anim_timer);
+        s->anim_n = s->anim_f;
     } else if (s->in_reset) {
         s->in_reset = false;
         s->asleep = false;
@@ -615,6 +656,7 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
     s->con = graphic_console_init(dev, 0, &uc8179_ops, s);
     qemu_console_resize(s->con, s->portrait ? H : W, s->portrait ? W : H);
     timer_init_ms(&s->busy_timer, QEMU_CLOCK_VIRTUAL, uc8179_busy_done, s);
+    timer_init_ns(&s->anim_timer, QEMU_CLOCK_VIRTUAL, uc8179_anim_tick, s);
     qdev_init_gpio_in_named(dev, uc8179_set_dc, "dc", 1);
     qdev_init_gpio_in_named(dev, uc8179_set_rst, "rst", 1);
     qdev_init_gpio_in_named(dev, uc8179_set_sclk, "sclk", 1);
@@ -624,13 +666,14 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
 }
 
 static Property uc8179_properties[] = {
-    DEFINE_PROP_UINT32("busy-ms", Uc8179State, busy_ms, 300),
+    DEFINE_PROP_UINT32("busy-ms", Uc8179State, busy_ms, 0),
+    DEFINE_PROP_BOOL("animate", Uc8179State, animate, true),
     DEFINE_PROP_BOOL("portrait", Uc8179State, portrait, true),
     /* 6: the vendor gray LUT's black + 2 / + 4 white frames read 1/3 and 2/3 */
     DEFINE_PROP_UINT8("swing-frames", Uc8179State, swing, 6),
     DEFINE_PROP_UINT32("rail-soft", Uc8179State, rail_soft, 100),
     DEFINE_PROP_UINT8("otp-fast-frames", Uc8179State, otp_fast_frames, 10),
-    DEFINE_PROP_UINT8("otp-full-frames", Uc8179State, otp_full_frames, 12),
+    DEFINE_PROP_UINT8("otp-full-frames", Uc8179State, otp_full_frames, 30),
     DEFINE_PROP_UINT32("otp-hold-drive", Uc8179State, otp_hold_drive, 6),
     DEFINE_PROP_UINT32("remnant-fast", Uc8179State, remnant_fast, 30),
     DEFINE_PROP_UINT32("remnant-fast-ms", Uc8179State, remnant_fast_ms, 1000),
