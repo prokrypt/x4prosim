@@ -125,14 +125,19 @@ Done on `x4prosim`:
 - Wi-Fi: the MAC is emulated with a fake AP bridged to a QEMU NIC (port of the
   lcgamboa ESP32-C3 model: `hw/misc/esp32s3_wifi.c`, `esp32_wifi_ap.c`,
   `esp32_wlan_packet.c`; analog/FE in `esp32s3_ana.c`, `esp32_fe.c`). `run.sh`
-  adds `-nic user,model=esp32_wifi,hostfwd=tcp::8080-:80`: a scan finds
-  `PICSimLabWifi` (open, ch 1), `Espressif` and `MasseyWifi`; joining
-  `PICSimLabWifi` gets DHCP 10.0.2.15 from QEMU user networking, outbound works
-  through the host, and host port 8080 reaches the device's port 80
-  (`curl localhost:8080`; `drive.py` takes the same `-nic` in `QEMU_EXTRA`). Add more `hostfwd=tcp::HOST-:GUEST` for other ports.
-  `X4NET=` (empty) or other `-nic` options override it; with no
-  `model=esp32_wifi` NIC the MAC is a stub and a scan finds 0 networks.
-  The station MAC comes from efuse (00-00-00-00-00-00 unless the efuse image sets it).
+  joins it to a network:
+  - `X4BR=br0 x4prosim/run.sh ...` bridges to your LAN: the firmware does its own
+    DHCP with your router and is reachable at that IP like a real device. Needs a
+    host bridge `br0` holding your Ethernet port, `allow br0` in
+    `/usr/local/etc/qemu/bridge.conf`, and root (the helper is `build/qemu-bridge-helper`).
+    Wi-Fi host NICs can't be bridged; use Ethernet.
+  - Default: QEMU NAT (`-nic user,model=esp32_wifi,hostfwd=tcp::8080-:80`), DHCP
+    10.0.2.15, host port 8080 reaches the device's port 80 (`curl localhost:8080`).
+  - `X4NET="-nic ..."` overrides both; `drive.py` takes the same `-nic` in `QEMU_EXTRA`.
+  A scan finds `PICSimLabWifi` (open, ch 1, the one that connects), `Espressif` and
+  `MasseyWifi`. With no `model=esp32_wifi` NIC the MAC is a stub and a scan finds 0.
+  Station MAC: the NIC's `mac=` (default 52:54:00:12:34:56) is burned into efuse
+  when no efuse file is given; give each sim on one LAN its own `mac=`.
 
 Still missing: LEDC frontlight, charger STAT (GPIO21 reads 1 = charging), real Wi-Fi
 (WPA, signal, other APs),

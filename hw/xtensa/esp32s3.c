@@ -944,9 +944,19 @@ static void esp32s3_machine_init(MachineState *machine)
         NICInfo *nd = qemu_find_nic_info(TYPE_ESP32_WIFI, false, NULL);
         if (nd) {
             d = qdev_new(TYPE_ESP32_WIFI);
-            /* station MAC as the firmware reads it from efuse */
+            /*
+             * Station MAC: with no efuse file, burn the NIC's MAC (mac=, default
+             * 52:54:00:12:34:56) into the in-RAM efuse so a LAN sees a real one.
+             */
+            ESPEfuseState *ef = &ss->efuse.parent;
+            if (ef->mirror) {
+                uint8_t *mm = (uint8_t *)&((ESPEfuseBlocks *)ef->mirror)->rd_mac_spi_sys_0;
+                for (int i = 0; i < 6; i++) {
+                    mm[5 - i] = nd->macaddr.a[i];
+                }
+            }
             device_cold_reset(DEVICE(&ss->efuse));
-            const uint8_t *m = (const uint8_t *)&ss->efuse.parent.efuses.blocks.rd_mac_spi_sys_0;
+            const uint8_t *m = (const uint8_t *)&ef->efuses.blocks.rd_mac_spi_sys_0;
             for (int i = 0; i < 6; i++) {
                 ESP32_WIFI(d)->macaddr[i] = m[5 - i];
             }
