@@ -111,7 +111,7 @@ Done on `x4prosim`:
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
 
-Still missing: I2C (see the helper task below), LEDC frontlight, charger STAT
+Still missing: LEDC frontlight, charger STAT
 (GPIO21 reads 1 = charging), Wi-Fi, deep sleep with ext0/ext1 wake, USB OTG.
 
 ## Hardware to model (X4 Pro pin map, from freeink-sdk BoardConfig.h `XTEINK_X4_PRO`)
@@ -121,10 +121,10 @@ Still missing: I2C (see the helper task below), LEDC frontlight, charger STAT
 | Display | UC8179 800x480 1-bit e-ink over GPSPI2, 10 MHz; SDA also read bit-banged | SCLK 12, SDA 11, CS 13, DC 18, RST 14, BUSY_N 6 | done |
 | SD | SDMMC slot 1, 1-bit, 40 MHz; GPIO5 = power enable, active-LOW | CLK 41, CMD 42, D0 40 | done |
 | Buttons | active-LOW, pull-up; Up 0 (strap), Down 7, Power 3 | GPIO | done |
-| **I2C bus** | **ESP32-S3 I2C0 controller, 400 kHz** | **SDA 39, SCL 38** | **helper agent** |
-| Touch | **GT911** at 0x5D (alt 0x14), INT 10, RST 4, power-enable GPIO2 active-LOW; reports X 0..480, Y 0..800 (portrait, firmware swaps XY and flips Y); has a capacitive Home key | on I2C | **helper agent** |
-| RTC | **BM8563** (PCF8563-compatible) at 0x51 | on I2C | **helper agent** |
-| Fuel gauge | **CW2017** at 0x63 | on I2C | **helper agent** |
+| **I2C bus** | **ESP32-S3 I2C0 controller, 400 kHz** | **SDA 39, SCL 38** | done |
+| Touch | **GT911** at 0x5D (alt 0x14), INT 10, RST 4, power-enable GPIO2 active-LOW; reports X 0..480, Y 0..800 (portrait, firmware swaps XY and flips Y); has a capacitive Home key | on I2C | done |
+| RTC | **BM8563** (PCF8563-compatible) at 0x51 | on I2C | done |
+| Fuel gauge | **CW2017** at 0x63 | on I2C | done |
 | Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | open |
 | Charger | STAT GPIO21, active-HIGH = charging | GPIO | open |
 | Wi-Fi | not emulated by Espressif QEMU | n/a | open (later) |
