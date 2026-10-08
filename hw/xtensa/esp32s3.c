@@ -148,7 +148,7 @@ typedef struct Esp32s3SocState {
     ESP32S3TimgState timg[2];
     ESP32S3SysTimerState systimer;
 
-    ESP32C3UsbJtagState jtag;
+    DeviceState *jtag;
     ESPRgbState rgb;
 
     MemoryRegion iomem;
@@ -638,7 +638,8 @@ static void esp32s3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(ss), "extmem", &ss->cache, TYPE_ESP32S3_CACHE);
     object_initialize_child(OBJECT(ss), "spi1", &ss->spi1, TYPE_ESP32S3_SPI);
     object_initialize_child(OBJECT(ss), "efuse", &ss->efuse, TYPE_ESP32S3_EFUSE);
-    object_initialize_child(OBJECT(ss), "jtag", &ss->jtag, TYPE_ESP32C3_JTAG);
+    ss->jtag = qdev_new("misc.esp32s3.usb_serial_jtag");
+    object_property_add_child(OBJECT(ss), "jtag", OBJECT(ss->jtag));
     object_initialize_child(OBJECT(ss), "gpio", &ss->gpio, TYPE_ESP32S3_GPIO);
     object_initialize_child(OBJECT(ss), "rng", &ss->rng, TYPE_ESP32S3_RNG);
 
@@ -670,9 +671,11 @@ static void esp32s3_machine_init(MachineState *machine)
 
     /* USB Serial JTAG realization */
     {
-        sysbus_realize(SYS_BUS_DEVICE(&ss->jtag), &error_fatal);
-        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->jtag), 0);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ss->jtag), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(ss->jtag), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_USB_SERIAL_JTAG_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ss->jtag), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_USB_SERIAL_JTAG_INTR_SOURCE));
     }
 
     /* SPI1 controller (SPI Flash) */
