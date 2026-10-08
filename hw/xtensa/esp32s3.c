@@ -912,6 +912,7 @@ static void esp32s3_machine_init(MachineState *machine)
     {
         DeviceState *spi2 = qdev_new("ssi.esp32s3.gpspi");
         object_property_add_child(OBJECT(ss), "spi2", OBJECT(spi2));
+        object_property_set_link(OBJECT(spi2), "gdma", OBJECT(&ss->gdma), &error_abort);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(spi2), &error_fatal);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI2_BASE,
                                             sysbus_mmio_get_region(SYS_BUS_DEVICE(spi2), 0), 1);
@@ -1043,6 +1044,14 @@ static DeviceState *x4pro_add_i2c(I2CBus *bus, const char *type, uint8_t addr)
  * touch (INT 10, RST 4, power enable GPIO2 active-low), BM8563 RTC and
  * CW2017 gauge.
  */
+static void x4pro_panel_cs(void *opaque, int n, int level)
+{
+    static bool high[2] = { true, true };
+
+    high[n] = level;
+    qemu_set_irq(opaque, high[0] && high[1]);
+}
+
 static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
 {
     DeviceState *gpio = DEVICE(&ss->gpio);
@@ -1051,7 +1060,10 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
     qdev_set_id(panel, g_strdup("panel"), &error_fatal);
     ssi_realize_and_unref(panel, bus, &error_fatal);
 
-    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 13, qdev_get_gpio_in_named(panel, SSI_GPIO_CS, 0));
+    /* Panel CS (active low) is GPIO13 or SPI2's hardware CS0, whichever the firmware drives. */
+    qemu_irq cs = qemu_allocate_irq(x4pro_panel_cs, qdev_get_gpio_in_named(panel, SSI_GPIO_CS, 0), 0);
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 13, cs);
+    qdev_connect_gpio_out_named(spi2, "cs0", 0, qemu_allocate_irq(x4pro_panel_cs, cs->opaque, 1));
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 18, qdev_get_gpio_in_named(panel, "dc", 0));
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 14, qdev_get_gpio_in_named(panel, "rst", 0));
     qdev_connect_gpio_out_named(panel, "busy", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 6));
