@@ -20,8 +20,10 @@
  *    VCOM, VDH -> black, VDL -> white. VDHR (11) on a source row is not modeled.
  *  - REG=0, OTP waveform (bodies not dumped): inside PTIN/PTOUT (0x91/0x92,
  *    whole panel; no 0x90 window) changed pixels get "otp-fast-frames" toward
- *    NEW and the rest none; otherwise every pixel gets "otp-full-frames" away
- *    from NEW, then as many toward it.
+ *    NEW and held ones a weak "otp-hold-drive" (per mille) toward their own
+ *    color, which wears a ghost down over later fast refreshes as the panel
+ *    does; otherwise every pixel gets "otp-full-frames" away from NEW, then as
+ *    many toward it.
  *  - CDI (0x50) N2OCP: NEW is copied to OLD after the refresh.
  * Per pixel and frame (ghosting mechanisms from the e-paper literature):
  *  - particle position moves 1/"swing-frames" of a full swing; the last
@@ -33,8 +35,8 @@
  *    pixels kick back where the last image changed;
  *  - blooming: a driven pixel loses part of its drive to fringe fields
  *    toward 4-neighbors driven differently ("bloom" per mille per neighbor),
- *    so thin strokes land short; undriven pixels are left alone (their
- *    field is mostly lateral), which keeps halos from piling up;
+ *    so thin strokes land short; pixels without a full drive are left alone
+ *    (their field is mostly lateral), which keeps halos from piling up;
  *  - drift: between updates, ink relaxes toward mid gray by at most "drift"
  *    per mille, with time constant "drift-s" since it was last driven.
  * Shown lightness is linear in position (L* from black to white), which puts
@@ -109,6 +111,7 @@ struct Uc8179State {
     uint32_t rail_soft;     /* per mille */
     uint8_t otp_fast_frames;
     uint8_t otp_full_frames;
+    uint32_t otp_hold_drive;    /* per mille */
     uint32_t remnant_fast, remnant_fast_ms;
     uint32_t remnant_slow, remnant_slow_ms;
     uint32_t bloom;         /* per mille per neighbor */
@@ -127,7 +130,7 @@ struct Uc8179State {
     uint8_t ram[2][H_ADDR][WB];
     Uc8179Ink *ink;         /* H x W */
     uint8_t cls[H][W];      /* OLD << 1 | NEW of the current refresh */
-    int8_t (*frames)[4];    /* drive per class, + toward white */
+    float (*frames)[4];     /* drive per class, + toward white */
     double t_refresh;       /* virtual seconds at the end of the last refresh */
     double t_drift;         /* drift applied up to here */
     uint8_t shade[SHADES + 1];
@@ -235,13 +238,15 @@ static int uc8179_otp_frames(Uc8179State *s)
     int n = 0;
 
     if (s->partial) {
+        float h = s->otp_hold_drive / 1000.0f;
         for (int i = 0; i < s->otp_fast_frames; i++, n++) {
-            memcpy(s->frames[n], (int8_t[4]) { 0, 1, -1, 0 }, 4);
+            memcpy(s->frames[n], (float[4]) { -h, 1, -1, h }, sizeof(s->frames[n]));
         }
     } else {
         for (int i = 0; i < 2 * s->otp_full_frames; i++, n++) {
-            int8_t to_new = i < s->otp_full_frames ? -1 : 1;
-            memcpy(s->frames[n], (int8_t[4]) { -to_new, to_new, -to_new, to_new }, 4);
+            float to_new = i < s->otp_full_frames ? -1 : 1;
+            memcpy(s->frames[n], (float[4]) { -to_new, to_new, -to_new, to_new },
+                   sizeof(s->frames[n]));
         }
     }
     return n;
@@ -314,15 +319,16 @@ static void uc8179_refresh(Uc8179State *s)
     n = s->psr & PSR_REG ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
 
     for (int f = 0; f < n; f++) {
-        const int8_t *e = s->frames[f];
+        const float *e = s->frames[f];
         bool edges = bloom && (e[0] != e[1] || e[0] != e[2] || e[0] != e[3]);
         for (int y = 0; y < H; y++) {
             const uint8_t *c = s->cls[y];
             for (int x = 0; x < W; x++) {
                 Uc8179Ink *k = &s->ink[y * W + x];
                 float d = e[c[x]];
-                if (edges && d) {
-                    int nb = 0;
+                bool driven = fabsf(d) >= 0.5f;
+                if (edges && driven) {
+                    float nb = 0;
                     nb += x > 0 ? e[c[x - 1]] - e[c[x]] : 0;
                     nb += x < W - 1 ? e[c[x + 1]] - e[c[x]] : 0;
                     nb += y > 0 ? e[s->cls[y - 1][x]] - e[c[x]] : 0;
@@ -336,7 +342,7 @@ static void uc8179_refresh(Uc8179State *s)
                 if (a != 0) {
                     k->p = ink_move(k->p, a * step, sigma);
                 }
-                if (e[c[x]]) {
+                if (driven) {
                     k->t_drive = now;
                 }
             }
@@ -625,6 +631,7 @@ static Property uc8179_properties[] = {
     DEFINE_PROP_UINT32("rail-soft", Uc8179State, rail_soft, 100),
     DEFINE_PROP_UINT8("otp-fast-frames", Uc8179State, otp_fast_frames, 10),
     DEFINE_PROP_UINT8("otp-full-frames", Uc8179State, otp_full_frames, 12),
+    DEFINE_PROP_UINT32("otp-hold-drive", Uc8179State, otp_hold_drive, 6),
     DEFINE_PROP_UINT32("remnant-fast", Uc8179State, remnant_fast, 30),
     DEFINE_PROP_UINT32("remnant-fast-ms", Uc8179State, remnant_fast_ms, 1000),
     DEFINE_PROP_UINT32("remnant-slow", Uc8179State, remnant_slow, 10),
