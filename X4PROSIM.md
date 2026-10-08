@@ -122,7 +122,11 @@ Done on `x4prosim`:
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
 
-Still missing: LEDC frontlight, charger STAT (GPIO21 reads 1 = charging), Wi-Fi,
+- Wi-Fi: no radio. `hw/misc/esp32s3_regstub.c` stubs the analog/FE/MAC registers
+  the PHY and MAC init poll (table in `esp32s3.c`), so `esp_wifi_start()` returns and a
+  scan finds 0 networks instead of spinning. Add rows there for new polls.
+
+Still missing: LEDC frontlight, charger STAT (GPIO21 reads 1 = charging), Wi-Fi radio,
 deep sleep with ext0/ext1 wake, USB OTG.
 
 Gaps another firmware is likely to hit (CrossDink doesn't need them yet):

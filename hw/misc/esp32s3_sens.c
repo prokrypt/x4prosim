@@ -3,7 +3,8 @@
  *
  * Plain register file, except the two oneshot result registers always read as
  * "conversion done" with a mid-scale sample, so ADC self-calibration and
- * analogRead() finish instead of polling forever.
+ * analogRead() finish instead of polling forever, and the on-chip temperature
+ * sensor (TSENS_CTRL) is always ready with a reading of about 25 C.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -22,6 +23,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(Esp32s3SensState, ESP32S3_SENS)
 #define R_SAR_MEAS2_CTRL2      0x30
 #define MEAS_DONE              BIT(16)
 #define MEAS_DATA_MASK         0xffff
+#define R_SAR_TSENS_CTRL       0x50
+#define TSENS_READY            BIT(8)
+#define TSENS_RAW_25C          104     /* IDF: 0.4386 * raw - 20.52 = 25 C */
 
 struct Esp32s3SensState {
     SysBusDevice parent_obj;
@@ -36,6 +40,9 @@ static uint64_t sens_read(void *opaque, hwaddr addr, unsigned int size)
     uint32_t r = s->regs[addr / 4];
     if (addr == R_SAR_MEAS1_CTRL2 || addr == R_SAR_MEAS2_CTRL2) {
         r = (r & ~MEAS_DATA_MASK) | MEAS_DONE | (s->adc_raw & MEAS_DATA_MASK);
+    }
+    if (addr == R_SAR_TSENS_CTRL) {
+        r = (r & ~0xff) | TSENS_READY | TSENS_RAW_25C;
     }
     return r;
 }

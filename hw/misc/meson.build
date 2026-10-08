@@ -177,6 +177,7 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32S3', if_true: files(
   'esp32s3_cache.c',
   'esp32s3_usb_jtag.c',
   'esp32s3_sens.c',
+  'esp32s3_regstub.c',
   'ssi_psram.c',
   'esp_sha.c',
   'esp32s3_sha.c',
