@@ -122,11 +122,20 @@ Done on `x4prosim`:
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
 
-- Wi-Fi: no radio. `hw/misc/esp32s3_regstub.c` stubs the analog/FE/MAC registers
-  the PHY and MAC init poll (table in `esp32s3.c`), so `esp_wifi_start()` returns and a
-  scan finds 0 networks instead of spinning. Add rows there for new polls.
+- Wi-Fi: the MAC is emulated with a fake AP bridged to a QEMU NIC (port of the
+  lcgamboa ESP32-C3 model: `hw/misc/esp32s3_wifi.c`, `esp32_wifi_ap.c`,
+  `esp32_wlan_packet.c`; analog/FE in `esp32s3_ana.c`, `esp32_fe.c`). `run.sh`
+  adds `-nic user,model=esp32_wifi,hostfwd=tcp::8080-:80`: a scan finds
+  `PICSimLabWifi` (open, ch 1), `Espressif` and `MasseyWifi`; joining
+  `PICSimLabWifi` gets DHCP 10.0.2.15 from QEMU user networking, outbound works
+  through the host, and host port 8080 reaches the device's port 80
+  (`curl localhost:8080`; `drive.py` takes the same `-nic` in `QEMU_EXTRA`). Add more `hostfwd=tcp::HOST-:GUEST` for other ports.
+  `X4NET=` (empty) or other `-nic` options override it; with no
+  `model=esp32_wifi` NIC the MAC is a stub and a scan finds 0 networks.
+  The station MAC comes from efuse (00-00-00-00-00-00 unless the efuse image sets it).
 
-Still missing: LEDC frontlight, charger STAT (GPIO21 reads 1 = charging), Wi-Fi radio,
+Still missing: LEDC frontlight, charger STAT (GPIO21 reads 1 = charging), real Wi-Fi
+(WPA, signal, other APs),
 deep sleep with ext0/ext1 wake, USB OTG.
 
 Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
@@ -151,7 +160,7 @@ Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
 | Fuel gauge | **CW2017** at 0x63 | on I2C | done |
 | Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | open |
 | Charger | STAT GPIO21, active-HIGH = charging | GPIO | open |
-| Wi-Fi | not emulated by Espressif QEMU | n/a | open (later) |
+| Wi-Fi | MAC + fake open AP bridged to `-nic user` (DHCP, hostfwd) | n/a | done |
 | Sleep | deep sleep + ext0/ext1 GPIO wake, RTC_NOINIT/RTC_DATA memory | RTC_CNTL | open (later) |
 
 ## Helper agent task: GPSPI2 DMA + hardware CS (current)

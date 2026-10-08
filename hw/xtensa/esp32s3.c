@@ -72,6 +72,9 @@
 #include "hw/ssi/ssi.h"
 #include "monitor/qdev.h"
 #include "qapi/qmp/qlist.h"
+#include "hw/misc/esp32s3_ana.h"
+#include "hw/misc/esp32_fe.h"
+#include "hw/misc/esp32s3_wifi.h"
 
 #define TYPE_ESP32S3_SOC "xtensa.esp32s3"
 #define ESP32S3_SOC(obj) OBJECT_CHECK(Esp32s3SocState, (obj), TYPE_ESP32S3_SOC)
@@ -904,10 +907,6 @@ static void esp32s3_machine_init(MachineState *machine)
             uint32_t off[4], mask[4];
             int n;
         } stubs[] = {
-            /* I2C_MST (analog regi2c master): SAR/regi2c status bits 24..26 */
-            { 0x6000E000, 0x100, { 0x4C, 0x50 }, { 1u << 24, 7u << 24 }, 2 },
-            /* FE (RF front end): IQ estimate done */
-            { 0x60006000, 0x1000, { 0x174 }, { 1u << 16 }, 1 },
             /* Wi-Fi MAC: hal_init waits for bit 0 after a reset write */
             { 0x60033000, 0x1000, { 0xD14 }, { 1u << 0 }, 1 },
         };
@@ -924,6 +923,39 @@ static void esp32s3_machine_init(MachineState *machine)
             sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
             memory_region_add_subregion_overlap(sys_mem, stubs[i].base,
                                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+        }
+    }
+
+    /*
+     * x4prosim: radio. ana (regi2c master, sets the channel) and fe answer the
+     * PHY calibration polls. With -nic user,model=esp32_wifi the MAC is emulated
+     * with a fake AP ("PICSimLabWifi", open) bridged to that NIC, over the stub.
+     */
+    {
+        DeviceState *d = qdev_new(TYPE_ESP32S3_ANA);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, 0x6000E000,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+        d = qdev_new(TYPE_ESP32_FE);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_FE_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+
+        NICInfo *nd = qemu_find_nic_info(TYPE_ESP32_WIFI, false, NULL);
+        if (nd) {
+            d = qdev_new(TYPE_ESP32_WIFI);
+            /* station MAC as the firmware reads it from efuse */
+            device_cold_reset(DEVICE(&ss->efuse));
+            const uint8_t *m = (const uint8_t *)&ss->efuse.parent.efuses.blocks.rd_mac_spi_sys_0;
+            for (int i = 0; i < 6; i++) {
+                ESP32_WIFI(d)->macaddr[i] = m[5 - i];
+            }
+            qdev_set_nic_properties(d, nd);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+            memory_region_add_subregion_overlap(sys_mem, 0x60033000,
+                                                sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 2);
+            sysbus_connect_irq(SYS_BUS_DEVICE(d), 0,
+                               qdev_get_gpio_in(intmatrix_dev, ETS_WIFI_MAC_INTR_SOURCE));
         }
     }
 
