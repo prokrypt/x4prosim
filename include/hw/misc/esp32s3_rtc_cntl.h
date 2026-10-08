@@ -12,6 +12,7 @@
 
 #include "hw/hw.h"
 #include "hw/sysbus.h"
+#include "qemu/timer.h"
 #include "hw/registerfields.h"
 #include "hw/misc/esp32s3_reg.h"
 
@@ -84,7 +85,21 @@ typedef struct Esp32s3RtcCntlState {
     uint32_t scratch_reg[ESP32S3_RTC_CNTL_SCRATCH_REG_COUNT];
     Esp32s3ResetCause reset_cause[ESP32S3_CPU_COUNT];
     bool stat_vector_sel[ESP32S3_CPU_COUNT];
+
+    /* x4prosim: light sleep (SLEEP_EN until a timer or GPIO wake source fires) */
+    uint32_t slp_timer[2];
+    uint32_t state0_reg;
+    uint32_t wakeup_state_reg;
+    uint32_t int_ena;
+    uint32_t int_raw;
+    uint32_t wakeup_cause;
+    bool sleeping;
+    int64_t sleep_start_ns;
+    bool gpio_wake;
+    QEMUTimer sleep_timer;
 } Esp32s3RtcCntlState;
+
+#define ESP32S3_RTC_GPIO_WAKE "gpio-wake"
 
 REG32(RTC_CNTL_OPTIONS0, 0x00)
     FIELD(RTC_CNTL_OPTIONS0, SW_SYS_RESET, 31, 1)

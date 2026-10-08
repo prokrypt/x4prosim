@@ -5,11 +5,10 @@
 set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
 img=$1; sd=${2:-sd.img}; shift; [ $# -gt 0 ] && shift
-[ -f "$sd" ] || { truncate -s 1G "$sd"; mkfs.vfat -F 32 "$sd" >/dev/null; }
+[ -f "$sd" ] || python3 "$here/x4prosim/mksd.py" "$sd"
 # QEMU writes to the flash image (NVS, OTA data); run a copy to keep the source clean.
 cp "$img" "$img.run"
-exec "$here/build/qemu-system-xtensa" -nographic -machine esp32s3 -m 8M \
-  -global ssi_psram.is_octal=true \
+exec "$here/build/qemu-system-xtensa" -machine x4pro \
   -drive file="$img.run",if=mtd,format=raw \
   -drive file="$sd",if=sd,format=raw \
   -chardev stdio,id=cdc,mux=off -serial null \
