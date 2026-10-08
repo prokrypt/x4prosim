@@ -892,6 +892,23 @@ static void esp32s3_machine_init(MachineState *machine)
                                             sysbus_mmio_get_region(SYS_BUS_DEVICE(sens), 0), 1);
     }
 
+    /* x4prosim: I2C0/I2C1 masters; board devices attach in x4pro_board_init */
+    {
+        static const hwaddr i2c_base[] = { DR_REG_I2C_EXT_BASE, DR_REG_I2C1_EXT_BASE };
+
+        for (int i = 0; i < ARRAY_SIZE(i2c_base); i++) {
+            DeviceState *i2c = qdev_new("esp32s3.i2c");
+            g_autofree char *name = g_strdup_printf("i2c%d", i);
+
+            object_property_add_child(OBJECT(ss), name, OBJECT(i2c));
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(i2c), &error_fatal);
+            memory_region_add_subregion_overlap(sys_mem, i2c_base[i],
+                                                sysbus_mmio_get_region(SYS_BUS_DEVICE(i2c), 0), 1);
+            sysbus_connect_irq(SYS_BUS_DEVICE(i2c), 0,
+                               qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT0_INTR_SOURCE + i));
+        }
+    }
+
     {
         DeviceState *spi2 = qdev_new("ssi.esp32s3.gpspi");
         object_property_add_child(OBJECT(ss), "spi2", OBJECT(spi2));
@@ -1010,10 +1027,21 @@ static ram_addr_t esp32s3_fixup_ram_size(ram_addr_t requested_size)
     return size;
 }
 
+static DeviceState *x4pro_add_i2c(I2CBus *bus, const char *type, uint8_t addr)
+{
+    I2CSlave *dev = i2c_slave_new(type, addr);
+
+    object_property_add_child(qdev_get_machine(), type, OBJECT(dev));
+    i2c_slave_realize_and_unref(dev, bus, &error_fatal);
+    return DEVICE(dev);
+}
+
 /*
  * Xteink X4 Pro board: UC8179 panel on GPSPI2 (CS 13, DC 18, RST 14,
- * BUSY_N 6 through GPIO; SCLK 12 and SDA 11 also bit-banged for reads) and
- * the Up/Down/Power keys (GPIO 0/7/3).
+ * BUSY_N 6 through GPIO; SCLK 12 and SDA 11 also bit-banged for reads), the
+ * Up/Down/Power keys (GPIO 0/7/3), and on I2C0 (SDA 39, SCL 38) the GT911
+ * touch (INT 10, RST 4, power enable GPIO2 active-low), BM8563 RTC and
+ * CW2017 gauge.
  */
 static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
 {
@@ -1040,6 +1068,16 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
         qdev_connect_gpio_out(keys, k, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, key_pins[k]));
     }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(keys), &error_fatal);
+
+    DeviceState *i2c0 = DEVICE(object_resolve_path_component(OBJECT(ss), "i2c0"));
+    I2CBus *i2c = I2C_BUS(qdev_get_child_bus(i2c0, "i2c"));
+    DeviceState *touch = x4pro_add_i2c(i2c, "gt911", 0x5d);
+    x4pro_add_i2c(i2c, "bm8563", 0x51);
+    x4pro_add_i2c(i2c, "cw2017", 0x63);
+    qdev_connect_gpio_out_named(touch, "int", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 10));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 2,
+                                qemu_irq_invert(qdev_get_gpio_in_named(touch, "power", 0)));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 4, qdev_get_gpio_in_named(touch, "rst", 0));
 }
 
 static void x4pro_machine_class_init(ObjectClass *oc, void *data)
