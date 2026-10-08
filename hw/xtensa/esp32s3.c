@@ -891,7 +891,9 @@ static void esp32s3_machine_init(MachineState *machine)
                                             sysbus_mmio_get_region(SYS_BUS_DEVICE(sens), 0), 1);
     }
 
-    /* x4prosim: I2C0/I2C1. The X4 Pro's board devices sit on I2C0 (SDA 39, SCL 38). */
+    /* x4prosim: I2C0/I2C1. The X4 Pro has GT911 touch, BM8563 RTC and CW2017
+     * gauge on I2C0 (SDA 39, SCL 38). GT911 "int" (GPIO10) stays unconnected
+     * until the GPIO model takes inputs. */
     {
         static const hwaddr i2c_base[] = { DR_REG_I2C_EXT_BASE, DR_REG_I2C1_EXT_BASE };
         I2CBus *i2c_bus[ARRAY_SIZE(i2c_base)];
@@ -908,6 +910,7 @@ static void esp32s3_machine_init(MachineState *machine)
                                qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT0_INTR_SOURCE + i));
             i2c_bus[i] = I2C_BUS(qdev_get_child_bus(i2c, "i2c"));
         }
+        esp32s3_add_i2c_slave(ss, i2c_bus[0], "gt911", 0x5d);
         esp32s3_add_i2c_slave(ss, i2c_bus[0], "bm8563", 0x51);
         esp32s3_add_i2c_slave(ss, i2c_bus[0], "cw2017", 0x63);
     }
