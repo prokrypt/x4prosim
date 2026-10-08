@@ -201,7 +201,7 @@ Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
 | Fuel gauge | **CW2017** at 0x63 | on I2C | done |
 | Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | open |
 | Charger | STAT GPIO21, active-HIGH = charging | GPIO | open |
-| Wi-Fi | MAC + fake open AP bridged to `-nic user` (DHCP, hostfwd) | n/a | done |
+| Wi-Fi | MAC + fake open AP bridged to a QEMU NIC: NAT (`-nic user`, hostfwd) or LAN (`X4BR=br0`) | n/a | done |
 | Sleep | deep sleep + ext0/ext1 GPIO wake, RTC_NOINIT/RTC_DATA memory | RTC_CNTL | open (later) |
 
 ## Helper agent task: GPSPI2 DMA + hardware CS (current)
