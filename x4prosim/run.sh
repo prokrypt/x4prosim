@@ -12,6 +12,7 @@ img=$1; sd=${2:-sd.img}; shift; [ $# -gt 0 ] && shift
 # QEMU writes to the flash image (NVS, OTA data); run a copy to keep the source clean.
 cp "$img" "$img.run"
 [ -n "$X4BR" ] && : "${X4NET=-nic bridge,br=$X4BR,helper=$here/build/qemu-bridge-helper,model=esp32_wifi}"
+[ -n "$X4BR" ] && echo "x4prosim: Wi-Fi bridged to $X4BR (LAN DHCP)" >&2 || echo "x4prosim: Wi-Fi on QEMU NAT (10.0.2.15); X4BR=br0 for your LAN" >&2
 # -icount: guest time follows instructions (~240 MHz), not host speed, so light-sleep timing can't overshoot.
 exec "$here/build/qemu-system-xtensa" -machine x4pro -icount shift=2,sleep=on \
   -drive file="$img.run",if=mtd,format=raw \
