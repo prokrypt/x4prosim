@@ -872,6 +872,15 @@ static void esp32s3_machine_init(MachineState *machine)
         memory_region_add_subregion_overlap(sys_mem, esp32s3_memmap[ESP32S3_MEMREGION_FRAMEBUF].base, &ss->rgb.vram, 0);
     }
 
+    /* x4prosim: register models for peripherals the X4 Pro firmware polls */
+    {
+        DeviceState *sens = qdev_new("misc.esp32s3.sens");
+        object_property_add_child(OBJECT(ss), "sens", OBJECT(sens));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(sens), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_SENS_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(sens), 0), 1);
+    }
+
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.rmt", DR_REG_RMT_BASE, 0x1000);
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.iomux", DR_REG_IO_MUX_BASE, 0x2000);
 
