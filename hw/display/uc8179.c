@@ -12,20 +12,31 @@
  * device; the waveform bodies, which were not dumped, read as 0x00.
  *
  * Models DTM1 (0x10, old plane) and DTM2 (0x13, new plane) and display
- * refresh (0x12), which holds BUSY_N low for "busy-ms" and then updates a
- * per-pixel ink level (KW mode, plane bit 1 = white):
- *  - PSR (0x00) REG=0, OTP waveform (bodies not dumped, so approximated):
- *    every pixel goes to DTM2. Inside PTIN/PTOUT (0x91/0x92, whole panel; no
- *    0x90 window) pixels with OLD == NEW are not driven and hold, and the
- *    others stop "ghost" per mille of a swing short of DTM2, so a fast
- *    refresh leaves faint traces until a full one.
- *  - REG=1, register LUTs (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK; 6-byte
- *    groups [levels, TP_A..TP_D, RP]): the row chosen by each pixel's OLD/NEW
- *    bits runs frame by frame. Drive = source - VCOM (VDH -> black, VDL ->
- *    white); each frame moves the ink 1/"swing-frames" of a full swing,
- *    clamped at black and white, so DC-balanced rows still land on a level
- *    and short ones leave gray. VDHR (11) on a source row is not modeled.
+ * refresh (0x12), which holds BUSY_N low for "busy-ms" and then simulates the
+ * ink (KW mode, plane bit 1 = white). Each refresh is a list of frames giving
+ * the drive per pixel class (OLD/NEW bits):
+ *  - PSR (0x00) REG=1: the register LUTs (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23
+ *    WK, 0x24 KK; 6-byte groups [levels, TP_A..TP_D, RP]); drive = source -
+ *    VCOM, VDH -> black, VDL -> white. VDHR (11) on a source row is not modeled.
+ *  - REG=0, OTP waveform (bodies not dumped): inside PTIN/PTOUT (0x91/0x92,
+ *    whole panel; no 0x90 window) changed pixels get "otp-fast-frames" toward
+ *    NEW and the rest none; otherwise every pixel gets "otp-full-frames" away
+ *    from NEW, then as many toward it.
  *  - CDI (0x50) N2OCP: NEW is copied to OLD after the refresh.
+ * Per pixel and frame (ghosting mechanisms from the e-paper literature):
+ *  - particle position moves 1/"swing-frames" of a full swing; the last
+ *    "rail-soft" of the way to black or white is an exponential approach, so
+ *    short drives fall short and long ones saturate (and erase history);
+ *  - remnant voltage: two charges (fast, slow) integrate the applied drive and
+ *    leak with their time constants; their field opposes it ("remnant-*" is
+ *    its steady-state fraction), so the next update lands by history and held
+ *    pixels kick back where the last image changed;
+ *  - blooming: fringe fields pull each pixel's drive toward its 4 neighbors'
+ *    ("bloom" per mille per neighbor), leaving faint edges;
+ *  - drift: between updates, ink relaxes toward mid gray by at most "drift"
+ *    per mille, with time constant "drift-s" since it was last driven.
+ * Shown lightness is linear in position (L* from black to white), which puts
+ * the vendor gray LUT's levels at even steps.
  * Other commands (power, booster, PLL, VCOM, temperature setting) are
  * accepted and ignored.
  *
@@ -34,6 +45,7 @@
  * (at your option) any later version.
  */
 #include "qemu/osdep.h"
+#include <math.h>
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -58,8 +70,17 @@ OBJECT_DECLARE_SIMPLE_TYPE(Uc8179State, UC8179)
 #define LUT_GROUPS (LUT_LEN / 6)
 #define PSR_REG 0x20
 #define CDI_N2OCP 0x08
-#define INK_SUB 1024            /* ink steps per LUT frame, for fine ghosts */
-#define INK_MAX(s) ((s)->swing * INK_SUB)
+#define MAX_FRAMES 8192
+#define SHADES 1024
+#define L_WHITE 94.5f           /* L* of the shown white (sRGB 0xF0) and black (0x10) */
+#define L_BLACK 4.7f
+
+/* One pixel's ink. */
+typedef struct Uc8179Ink {
+    float p;                /* particle position: 0 black .. 1 white */
+    float qf, qs;           /* remnant charge, fast and slow (drive x seconds) */
+    float t_drive;          /* virtual seconds when it was last driven */
+} Uc8179Ink;
 
 enum { PLANE_OLD, PLANE_NEW };
 
@@ -83,7 +104,14 @@ struct Uc8179State {
     bool partial;           /* between PTIN and PTOUT */
     uint8_t lut[LUT_ROWS][LUT_LEN];
     uint8_t swing;          /* frames of one-way drive for a full black <-> white swing */
-    uint16_t ghost;         /* per mille of a swing an OTP fast refresh falls short */
+    uint32_t rail_soft;     /* per mille */
+    uint8_t otp_fast_frames;
+    uint8_t otp_full_frames;
+    uint32_t remnant_fast, remnant_fast_ms;
+    uint32_t remnant_slow, remnant_slow_ms;
+    uint32_t bloom;         /* per mille per neighbor */
+    uint32_t drift, drift_s;
+    uint32_t frame_us;
 
     /* bit-banged SPI on GPIO */
     bool sclk;
@@ -95,7 +123,12 @@ struct Uc8179State {
 
     uint8_t otp[OTP_SIZE];
     uint8_t ram[2][H_ADDR][WB];
-    uint16_t ink[H][W];     /* shown level: 0 black .. INK_MAX(s) white */
+    Uc8179Ink *ink;         /* H x W */
+    uint8_t cls[H][W];      /* OLD << 1 | NEW of the current refresh */
+    int8_t (*frames)[4];    /* drive per class, + toward white */
+    double t_refresh;       /* virtual seconds at the end of the last refresh */
+    double t_drift;         /* drift applied up to here */
+    uint8_t shade[SHADES + 1];
     bool redraw;
 };
 
@@ -151,62 +184,163 @@ static bool lut_next(LutCursor *c, int *level)
     return false;
 }
 
-/* What a LUT row does to each ink level 0..INK_MAX: map[level] = level after. */
-static void uc8179_row_map(Uc8179State *s, int r, uint16_t *map)
+static double uc8179_now(void)
 {
-    static const int drive[4] = { 0, 1, -1, 0 };    /* GND, VDH, VDL, VDHR/float */
-    LutCursor src = { .row = s->lut[r] }, com = { .row = s->lut[0] };
-    bool vdhr = false;
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9;
+}
 
-    for (int i = 0; i <= INK_MAX(s); i++) {
-        map[i] = i;
+/* Frames of the uploaded LUTs; returns the frame count. */
+static int uc8179_lut_frames(Uc8179State *s)
+{
+    static const int level[4] = { 0, 1, -1, 0 };    /* GND, VDH, VDL, VDHR/float: + toward black */
+    static const int row_of[4] = { 4, 2, 3, 1 };    /* class: KK, KW, WK, WW */
+    LutCursor c[LUT_ROWS];
+    bool vdhr = false;
+    int n = 0;
+
+    for (int r = 0; r < LUT_ROWS; r++) {
+        c[r] = (LutCursor) { .row = s->lut[r] };
     }
     for (;;) {
-        int ls = 0, lc = 0;
-        bool more_s = lut_next(&src, &ls), more_c = lut_next(&com, &lc);
-        if (!more_s && !more_c) {
+        int l[LUT_ROWS] = { 0 };
+        bool more = false;
+        for (int r = 0; r < LUT_ROWS; r++) {
+            more |= lut_next(&c[r], &l[r]);
+        }
+        if (!more) {
             break;
         }
-        vdhr |= ls == 3;
-        int d = drive[ls] - drive[lc];     /* > 0 toward black */
-        if (d) {
-            for (int i = 0; i <= INK_MAX(s); i++) {
-                map[i] = MIN(INK_MAX(s), MAX(0, (int)map[i] - d * INK_SUB));
-            }
+        if (n == MAX_FRAMES) {
+            qemu_log_mask(LOG_GUEST_ERROR, "uc8179: LUT over %d frames, cut\n", MAX_FRAMES);
+            break;
         }
+        for (int k = 0; k < 4; k++) {
+            int r = row_of[k];
+            vdhr |= l[r] == 3;
+            s->frames[n][k] = level[l[0]] - level[l[r]];
+        }
+        n++;
     }
     if (vdhr) {
-        qemu_log_mask(LOG_UNIMP, "uc8179: VDHR in LUT row 0x%x not modeled\n", 0x20 + r);
+        qemu_log_mask(LOG_UNIMP, "uc8179: VDHR in a LUT row not modeled\n");
     }
+    return n;
+}
+
+/* Stand-in OTP waveforms; returns the frame count. */
+static int uc8179_otp_frames(Uc8179State *s)
+{
+    int n = 0;
+
+    if (s->partial) {
+        for (int i = 0; i < s->otp_fast_frames; i++, n++) {
+            memcpy(s->frames[n], (int8_t[4]) { 0, 1, -1, 0 }, 4);
+        }
+    } else {
+        for (int i = 0; i < 2 * s->otp_full_frames; i++, n++) {
+            int8_t to_new = i < s->otp_full_frames ? -1 : 1;
+            memcpy(s->frames[n], (int8_t[4]) { -to_new, to_new, -to_new, to_new }, 4);
+        }
+    }
+    return n;
+}
+
+/*
+ * Moves position p by a (in swings; + toward white). Linear until "sigma"
+ * short of the rail it moves toward, then an exponential approach.
+ */
+static inline float ink_move(float p, float a, float sigma)
+{
+    float x = a > 0 ? 1 - p : p, d = fabsf(a);
+
+    if (sigma <= 0) {
+        x = MAX(x - d, 0);
+    } else if (x - d >= sigma) {
+        x -= d;
+    } else {
+        float lin = MAX(x - sigma, 0);
+        x = MIN(x, sigma) * expf(-(d - lin) / sigma);
+    }
+    return a > 0 ? 1 - x : x;
+}
+
+/* Ink drifts toward mid gray; with "leak", remnant charge leaks since the last refresh. */
+static void uc8179_relax(Uc8179State *s, double now, bool leak)
+{
+    float rf = s->remnant_fast_ms ? expf(-(now - s->t_refresh) * 1e3 / s->remnant_fast_ms) : 0;
+    float rs = s->remnant_slow_ms ? expf(-(now - s->t_refresh) * 1e3 / s->remnant_slow_ms) : 0;
+    bool drift = s->drift && s->drift_s && now > s->t_drift;
+    float amt = s->drift / 1000.0f, tau = s->drift_s;
+
+    for (int i = 0; i < H * W; i++) {
+        Uc8179Ink *k = &s->ink[i];
+        if (leak) {
+            k->qf *= rf;
+            k->qs *= rs;
+        }
+        if (drift) {
+            /* dp/dt = (1/2 - p) amt/tau e^(-age/tau): at most amt of the way */
+            float pull = amt * (expf(-(s->t_drift - k->t_drive) / tau) -
+                                expf(-(now - k->t_drive) / tau));
+            k->p += (0.5f - k->p) * pull;
+        }
+    }
+    s->t_drift = now;
 }
 
 static void uc8179_refresh(Uc8179State *s)
 {
-    /* LUT row per pixel, indexed by OLD << 1 | NEW: KK, KW, WK, WW */
-    static const int row_of[4] = { 4, 2, 3, 1 };
-    bool reg = s->psr & PSR_REG;
-    g_autofree uint16_t *map = reg ? g_new(uint16_t, LUT_ROWS * (INK_MAX(s) + 1)) : NULL;
-    int residue = s->partial ? INK_MAX(s) * s->ghost / 1000 : 0;
+    float dt = s->frame_us / 1e6f, step = 1.0f / s->swing;
+    float sigma = s->rail_soft / 1000.0f, bloom = s->bloom / 1000.0f;
+    float kf = s->remnant_fast_ms ? expf(-dt * 1e3f / s->remnant_fast_ms) : 0;
+    float ks = s->remnant_slow_ms ? expf(-dt * 1e3f / s->remnant_slow_ms) : 0;
+    float gf = s->remnant_fast_ms ? s->remnant_fast * 1.0f / s->remnant_fast_ms : 0;
+    float gs = s->remnant_slow_ms ? s->remnant_slow * 1.0f / s->remnant_slow_ms : 0;
+    double now = uc8179_now();
+    int n;
 
-    if (reg) {
-        for (int r = 1; r < LUT_ROWS; r++) {
-            uc8179_row_map(s, r, map + r * (INK_MAX(s) + 1));
-        }
-    }
+    uc8179_relax(s, now, now > s->t_refresh);
     /* The driver streams framebuffer row h-1-i into RAM row i. */
     for (int y = 0; y < H; y++) {
         int r = H - 1 - y;
         for (int x = 0; x < W; x++) {
             int o = (s->ram[PLANE_OLD][r][x / 8] >> (7 - x % 8)) & 1;
-            int n = (s->ram[PLANE_NEW][r][x / 8] >> (7 - x % 8)) & 1;
-            uint16_t *w = &s->ink[y][x];
-            if (reg) {
-                *w = map[row_of[o << 1 | n] * (INK_MAX(s) + 1) + *w];
-            } else if (!s->partial || o != n) {
-                *w = n ? INK_MAX(s) - residue : residue;
+            int nw = (s->ram[PLANE_NEW][r][x / 8] >> (7 - x % 8)) & 1;
+            s->cls[y][x] = o << 1 | nw;
+        }
+    }
+    n = s->psr & PSR_REG ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
+
+    for (int f = 0; f < n; f++) {
+        const int8_t *e = s->frames[f];
+        bool edges = bloom && (e[0] != e[1] || e[0] != e[2] || e[0] != e[3]);
+        for (int y = 0; y < H; y++) {
+            const uint8_t *c = s->cls[y];
+            for (int x = 0; x < W; x++) {
+                Uc8179Ink *k = &s->ink[y * W + x];
+                float d = e[c[x]];
+                if (edges) {
+                    int nb = 0;
+                    nb += x > 0 ? e[c[x - 1]] - e[c[x]] : 0;
+                    nb += x < W - 1 ? e[c[x + 1]] - e[c[x]] : 0;
+                    nb += y > 0 ? e[s->cls[y - 1][x]] - e[c[x]] : 0;
+                    nb += y < H - 1 ? e[s->cls[y + 1][x]] - e[c[x]] : 0;
+                    d += bloom * nb;
+                }
+                /* field = fraction / tau * charge; per mille / ms = 1 / s */
+                float a = d - gf * k->qf - gs * k->qs;
+                k->qf = k->qf * kf + d * dt;
+                k->qs = k->qs * ks + d * dt;
+                if (a != 0) {
+                    k->p = ink_move(k->p, a * step, sigma);
+                }
+                if (e[c[x]]) {
+                    k->t_drive = now;
+                }
             }
         }
     }
+    s->t_refresh = s->t_drift = now + n * dt;
     if (s->cdi & CDI_N2OCP) {
         memcpy(s->ram[PLANE_OLD], s->ram[PLANE_NEW], sizeof(s->ram[PLANE_NEW]));
     }
@@ -403,7 +537,12 @@ static void uc8179_update_display(void *opaque)
 {
     Uc8179State *s = opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
+    double now = uc8179_now();
 
+    if (s->drift && s->drift_s && now - s->t_drift >= 1.0) {
+        uc8179_relax(s, now, false);
+        s->redraw = true;
+    }
     if (!s->redraw) {
         return;
     }
@@ -412,7 +551,8 @@ static void uc8179_update_display(void *opaque)
     int stride = surface_stride(surface) / 4;
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
-            uint8_t g = 0x10 + (s->ink[y][x] * 0xe0 + INK_MAX(s) / 2) / INK_MAX(s);
+            float p = MIN(1.0f, MAX(0.0f, s->ink[y * W + x].p));
+            uint8_t g = s->shade[(int)(p * SHADES + 0.5f)];
             int dx = s->portrait ? H - 1 - y : x, dy = s->portrait ? x : y;
             d[dy * stride + dx] = rgb_to_pixel32(g, g, g);
         }
@@ -446,15 +586,21 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
         }
     }
     memset(s->ram, 0xff, sizeof(s->ram));
-    if (!s->swing || INK_MAX(s) > UINT16_MAX || s->ghost > 500) {
-        error_setg(errp, "uc8179: swing-frames must be 1..%d and ghost 0..500",
-                   UINT16_MAX / INK_SUB);
+    if (!s->swing) {
+        error_setg(errp, "uc8179: swing-frames must be at least 1");
         return;
     }
-    for (int y = 0; y < H; y++) {
-        for (int x = 0; x < W; x++) {
-            s->ink[y][x] = INK_MAX(s);
-        }
+    s->ink = g_new0(Uc8179Ink, H * W);
+    for (int i = 0; i < H * W; i++) {
+        s->ink[i].p = 1;
+    }
+    s->frames = g_malloc(MAX_FRAMES * sizeof(*s->frames));
+    /* position -> L* (linear) -> sRGB */
+    for (int i = 0; i <= SHADES; i++) {
+        float l = L_BLACK + (L_WHITE - L_BLACK) * i / SHADES;
+        float y = l > 8 ? powf((l + 16) / 116, 3) : l / 903.3f;
+        float v = y <= 0.0031308f ? 12.92f * y : 1.055f * powf(y, 1 / 2.4f) - 0.055f;
+        s->shade[i] = MIN(255, (int)(v * 255 + 0.5f));
     }
     uc8179_reset_regs(s);
     s->redraw = true;
@@ -474,7 +620,17 @@ static Property uc8179_properties[] = {
     DEFINE_PROP_BOOL("portrait", Uc8179State, portrait, true),
     /* 6: the vendor gray LUT's black + 2 / + 4 white frames read 1/3 and 2/3 */
     DEFINE_PROP_UINT8("swing-frames", Uc8179State, swing, 6),
-    DEFINE_PROP_UINT16("ghost", Uc8179State, ghost, 20),
+    DEFINE_PROP_UINT32("rail-soft", Uc8179State, rail_soft, 100),
+    DEFINE_PROP_UINT8("otp-fast-frames", Uc8179State, otp_fast_frames, 7),
+    DEFINE_PROP_UINT8("otp-full-frames", Uc8179State, otp_full_frames, 12),
+    DEFINE_PROP_UINT32("remnant-fast", Uc8179State, remnant_fast, 60),
+    DEFINE_PROP_UINT32("remnant-fast-ms", Uc8179State, remnant_fast_ms, 1000),
+    DEFINE_PROP_UINT32("remnant-slow", Uc8179State, remnant_slow, 30),
+    DEFINE_PROP_UINT32("remnant-slow-ms", Uc8179State, remnant_slow_ms, 30000),
+    DEFINE_PROP_UINT32("bloom", Uc8179State, bloom, 15),
+    DEFINE_PROP_UINT32("drift", Uc8179State, drift, 50),
+    DEFINE_PROP_UINT32("drift-s", Uc8179State, drift_s, 1800),
+    DEFINE_PROP_UINT32("frame-us", Uc8179State, frame_us, 25000),
     DEFINE_PROP_END_OF_LIST(),
 };
 
