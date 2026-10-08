@@ -45,6 +45,26 @@ x4prosim/drive.py flash.bin sd.img log.txt wait:30 shot:home.png   # headless
 ```
 
 `run.sh`/`drive.py` create a 1 GB MBR+FAT32 `sd.img` if it doesn't exist (`x4prosim/mksd.py sd.img 1024 books/` copies a folder in). Keep
+
+### Firmware build gotchas (PlatformIO, pioarduino 6.1.19)
+
+- **`ModuleNotFoundError: No module named 'SCons.Tool.FortranCommon'`** at the
+  `firmware.elf` link step: the `tool-scons` package is half-installed. Delete it
+  and rebuild; pio reinstalls it: `rm -rf ~/.platformio/packages/tool-scons`.
+- **`*** Reinstall Arduino framework ***`** on the first build in a new checkout is
+  normal (pioarduino keys its hybrid-compiled IDF on `sdkconfig.defaults`). It
+  re-downloads `framework-arduinoespressif32` from GitHub releases and recompiles
+  the IDF libs, so the first build takes several minutes.
+- **`CERTIFICATE_VERIFY_FAILED` / `self-signed certificate in certificate chain`**
+  during that download: pio's own Python uses its bundled certifi, which doesn't
+  trust a corporate or sandbox proxy CA. Point it at the system bundle:
+  `ln -sf /etc/ssl/certs/ca-certificates.crt "$(~/.platformio/penv/bin/python -c 'import certifi; print(certifi.where())')"`
+  (or your proxy's CA file).
+- **Never run two `pio run` at once**, even in different checkouts: they share
+  `~/.platformio` and one will wipe the framework under the other.
+- CI artifacts carry `firmware.bin` only. You need a local build for
+  `firmware.elf` (symbols), `bootloader.bin` and `partitions.bin`.
+
 `firmware.elf` beside you for symbols. To find a hang: run with `-s -S`, attach
 `xtensa-esp32s3-elf-gdb firmware.elf` (`target remote :1234`), let it run, Ctrl-C,
 `bt`. Or `info registers -a` on the HMP socket `/tmp/x4prosim-mon.sock` and
