@@ -106,6 +106,31 @@ Done on `x4prosim`:
   `controller=UC8179 ... promoted=1`. Graphic console shown portrait like the
   device (`portrait=false` for raw). `hw/display/ssd1677.c` is an unused SSD1677
   model kept for reference.
+- UC8179 ink and ghosting (helper agent; full notes, data and tests in
+  `x4prosim/ghosting/README.md`): each refresh (0x12) is simulated frame by frame
+  instead of showing the planes.
+  - PSR REG picks the waveform per refresh: REG=1 runs the uploaded register LUTs
+    (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK); REG=0 runs stand-ins for the
+    OTP waveforms (bodies never dumped): fast inside PTIN/PTOUT, full otherwise.
+    CDI N2OCP copies NEW to OLD after the refresh.
+  - Per pixel: saturating particle motion, two-component remnant voltage,
+    blooming (edge loss), drift toward gray, shown linear in L*. Defaults are
+    fitted to device photos: a typed-then-deleted word leaves ~11% ghost (device
+    ~11%) that fades x0.53 over 6 fast refreshes (device x0.51); menus and gray
+    book pages come out clean.
+  - Every parameter is `-global uc8179.<name>=N` and 0 turns that mechanism off:
+    `swing-frames` 6, `rail-soft` 100, `otp-fast-frames` 10, `otp-full-frames` 12,
+    `otp-hold-drive` 6, `remnant-fast`/`-ms` 30/1000, `remnant-slow`/`-ms`
+    10/30000, `bloom` 35, `drift`/`drift-s` 50/1800 (uncalibrated), `frame-us`
+    25000, `busy-ms` 300. Units and what each was fitted to: the notes, 3.4.
+  - Ink state is 16 B/pixel (6 MB) and the frame loop runs on QEMU's main loop.
+  - Measure: `test/*-steps.txt` replay a scenario with `drive.py`,
+    `tools/pepmeasure.py` / `seqmeasure.py` / `hist.py` read the screenshots,
+    `tools/photomeasure.py` the device photos.
+- `hw/display/esp_rgb.c`: the RGB console is created at realize, so `x4pro`
+  (which never realizes it) no longer opens a stray black 800x600 SDL window.
+- `hw/misc/esp32s3_sens.c`: temperature sensor always ready, 25 C (Goodies >
+  Battery & Stats hung a core on it). `run.sh` shows the host cursor in SDL.
 - `-icount shift=2` (set by `run.sh`/`drive.py`): guest time follows instructions,
   not host speed; without it FreeRTOS can assert after light sleep on a slow host.
   Guest runs slower than real time, so give `wait:` steps generous values.
@@ -148,8 +173,10 @@ Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
   command/address/dummy phases, and half-duplex reads on SDA.
 - GPIO matrix / IO_MUX routing: pins are wired directly, so a peripheral routed to
   a different pin than the X4 Pro's won't reach the device.
-- UC8179: partial window (0x90/0x91/0x92), register LUT waveforms (shown as 4 gray
-  levels, not simulated), and timing (refresh BUSY is a fixed `busy-ms`).
+- UC8179: the 0x90 partial window, LUTBD (0x25), VDHR, VCOM_DC value and
+  temperature (TSSET) aren't modeled; the OTP waveforms are stand-ins until the
+  full 0xA2 OTP is dumped; BUSY is a fixed `busy-ms`, not frames x frame time.
+  Open calibration items: `x4prosim/ghosting/README.md` section 8.
 - Flash encryption and secure boot.
 
 ## Hardware to model (X4 Pro pin map, from freeink-sdk BoardConfig.h `XTEINK_X4_PRO`)
