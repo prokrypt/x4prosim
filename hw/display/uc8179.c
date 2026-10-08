@@ -12,9 +12,18 @@
  * device; the waveform bodies, which were not dumped, read as 0x00.
  *
  * Models DTM1 (0x10, old plane) and DTM2 (0x13, new plane) and display
- * refresh (0x12), which holds BUSY_N low for "busy-ms" and then shows the
- * panel. Waveforms are not simulated: with no LUT upload the panel shows
- * DTM2; after a LUT upload (0x20..0x24) it shows DTM1/DTM2 as 4 gray levels.
+ * refresh (0x12), which holds BUSY_N low for "busy-ms" and then updates a
+ * per-pixel ink level (KW mode, plane bit 1 = white):
+ *  - PSR (0x00) REG=0, OTP waveform (bodies not dumped, so idealized): every
+ *    pixel goes to DTM2, except inside PTIN/PTOUT (0x91/0x92, whole panel; no
+ *    0x90 window) where pixels with OLD == NEW are not driven and hold.
+ *  - REG=1, register LUTs (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK; 6-byte
+ *    groups [levels, TP_A..TP_D, RP]): the row chosen by each pixel's OLD/NEW
+ *    bits runs frame by frame. Drive = source - VCOM (VDH -> black, VDL ->
+ *    white); each frame moves the ink 1/"swing-frames" of a full swing,
+ *    clamped at black and white, so DC-balanced rows still land on a level
+ *    and short ones leave gray. VDHR (11) on a source row is not modeled.
+ *  - CDI (0x50) N2OCP: NEW is copied to OLD after the refresh.
  * Other commands (power, booster, PLL, VCOM, temperature setting) are
  * accepted and ignored.
  *
@@ -23,6 +32,7 @@
  * (at your option) any later version.
  */
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -41,6 +51,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(Uc8179State, UC8179)
 #define WB (W / 8)
 #define OTP_SIZE 0x1000
 #define OTP_TR(n) (0x49 + (n) * 0xF7)
+#define LUT_ROWS 5
+#define LUT_LEN 60              /* 10 groups; the X4 Pro driver writes 7 */
+#define LUT_GROUPS (LUT_LEN / 6)
+#define PSR_REG 0x20
+#define CDI_N2OCP 0x08
 
 enum { PLANE_OLD, PLANE_NEW };
 
@@ -58,8 +73,12 @@ struct Uc8179State {
     bool asleep;
     bool busy;
     uint8_t cmd;
-    uint32_t pos;           /* byte index into the plane being written, or read index */
-    bool custom_lut;
+    uint32_t pos;           /* byte index into the plane or LUT being written, or read index */
+    uint8_t psr;            /* PSR byte 0 */
+    uint8_t cdi;            /* CDI byte 0 */
+    bool partial;           /* between PTIN and PTOUT */
+    uint8_t lut[LUT_ROWS][LUT_LEN];
+    uint8_t swing;          /* frames of one-way drive for a full black <-> white swing */
 
     /* bit-banged SPI on GPIO */
     bool sclk;
@@ -71,7 +90,7 @@ struct Uc8179State {
 
     uint8_t otp[OTP_SIZE];
     uint8_t ram[2][H_ADDR][WB];
-    uint8_t shown[H][WB * 2];
+    uint8_t ink[H][W];      /* shown level: 0 black .. swing white */
     bool redraw;
 };
 
@@ -99,22 +118,91 @@ static void uc8179_busy_done(void *opaque)
     qemu_set_irq(s->busy_n, 1);
 }
 
+/* Walks one LUT row frame by frame. */
+typedef struct LutCursor {
+    const uint8_t *row;
+    int group, rep, phase, frame;
+} LutCursor;
+
+static bool lut_next(LutCursor *c, int *level)
+{
+    while (c->group < LUT_GROUPS) {
+        const uint8_t *g = c->row + c->group * 6;
+        if (c->rep >= g[5]) {
+            c->group++;
+            c->rep = c->phase = c->frame = 0;
+        } else if (c->phase >= 4) {
+            c->rep++;
+            c->phase = c->frame = 0;
+        } else if (c->frame >= g[1 + c->phase]) {
+            c->phase++;
+            c->frame = 0;
+        } else {
+            c->frame++;
+            *level = (g[0] >> (6 - 2 * c->phase)) & 3;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* What a LUT row does to each ink level 0..swing: map[level] = level after. */
+static void uc8179_row_map(Uc8179State *s, int r, uint8_t *map)
+{
+    static const int drive[4] = { 0, 1, -1, 0 };    /* GND, VDH, VDL, VDHR/float */
+    LutCursor src = { .row = s->lut[r] }, com = { .row = s->lut[0] };
+    bool vdhr = false;
+
+    for (int i = 0; i <= s->swing; i++) {
+        map[i] = i;
+    }
+    for (;;) {
+        int ls = 0, lc = 0;
+        bool more_s = lut_next(&src, &ls), more_c = lut_next(&com, &lc);
+        if (!more_s && !more_c) {
+            break;
+        }
+        vdhr |= ls == 3;
+        int d = drive[ls] - drive[lc];     /* > 0 toward black */
+        if (d) {
+            for (int i = 0; i <= s->swing; i++) {
+                map[i] = MIN(s->swing, MAX(0, map[i] - d));
+            }
+        }
+    }
+    if (vdhr) {
+        qemu_log_mask(LOG_UNIMP, "uc8179: VDHR in LUT row 0x%x not modeled\n", 0x20 + r);
+    }
+}
+
 static void uc8179_refresh(Uc8179State *s)
 {
+    /* LUT row per pixel, indexed by OLD << 1 | NEW: KK, KW, WK, WW */
+    static const int row_of[4] = { 4, 2, 3, 1 };
+    bool reg = s->psr & PSR_REG;
+    uint8_t map[LUT_ROWS][UINT8_MAX + 1];
+
+    if (reg) {
+        for (int r = 1; r < LUT_ROWS; r++) {
+            uc8179_row_map(s, r, map[r]);
+        }
+    }
     /* The driver streams framebuffer row h-1-i into RAM row i. */
     for (int y = 0; y < H; y++) {
         int r = H - 1 - y;
-        for (int xb = 0; xb < WB; xb++) {
-            uint8_t o = s->ram[PLANE_OLD][r][xb], n = s->ram[PLANE_NEW][r][xb];
-            uint16_t px = 0;
-            for (int b = 7; b >= 0; b--) {
-                int lvl = s->custom_lut ? (((n >> b) & 1) << 1) | ((o >> b) & 1)
-                                        : (((n >> b) & 1) ? 3 : 0);
-                px = (px << 2) | lvl;
+        for (int x = 0; x < W; x++) {
+            int o = (s->ram[PLANE_OLD][r][x / 8] >> (7 - x % 8)) & 1;
+            int n = (s->ram[PLANE_NEW][r][x / 8] >> (7 - x % 8)) & 1;
+            uint8_t *w = &s->ink[y][x];
+            if (reg) {
+                *w = map[row_of[o << 1 | n]][*w];
+            } else if (!s->partial || o != n) {
+                *w = n ? s->swing : 0;
             }
-            s->shown[y][xb * 2] = px >> 8;
-            s->shown[y][xb * 2 + 1] = px & 0xff;
         }
+    }
+    if (s->cdi & CDI_N2OCP) {
+        memcpy(s->ram[PLANE_OLD], s->ram[PLANE_NEW], sizeof(s->ram[PLANE_NEW]));
     }
     s->redraw = true;
 }
@@ -137,8 +225,11 @@ static void uc8179_command(Uc8179State *s, uint8_t c)
         uc8179_refresh(s);
         uc8179_set_busy(s, s->busy_ms);
         break;
-    case 0x20 ... 0x24:
-        s->custom_lut = true;
+    case 0x91:  /* PTIN */
+        s->partial = true;
+        break;
+    case 0x92:  /* PTOUT */
+        s->partial = false;
         break;
     case 0x40:  /* TSC: BUSY while sensing, then the reading is clocked out */
         uc8179_set_busy(s, 5);
@@ -159,8 +250,23 @@ static void uc8179_command(Uc8179State *s, uint8_t c)
 static void uc8179_data(Uc8179State *s, uint8_t v)
 {
     switch (s->cmd) {
+    case 0x00:
+        if (s->pos++ == 0) {
+            s->psr = v;
+        }
+        break;
     case 0x07:
         if (v == 0xA5) s->asleep = true;
+        break;
+    case 0x20 ... 0x24:
+        if (s->pos < LUT_LEN) {
+            s->lut[s->cmd - 0x20][s->pos++] = v;
+        }
+        break;
+    case 0x50:
+        if (s->pos++ == 0) {
+            s->cdi = v;
+        }
         break;
     case 0x10:
     case 0x13:
@@ -264,6 +370,14 @@ static int uc8179_set_cs(SSIPeripheral *dev, bool level)
     return 0;
 }
 
+static void uc8179_reset_regs(Uc8179State *s)
+{
+    s->psr = 0x0F;      /* REG=0: OTP waveforms */
+    s->cdi = 0x31;      /* N2OCP off */
+    s->partial = false;
+    memset(s->lut, 0, sizeof(s->lut));
+}
+
 static void uc8179_set_rst(void *opaque, int n, int level)
 {
     Uc8179State *s = UC8179(opaque);
@@ -272,7 +386,7 @@ static void uc8179_set_rst(void *opaque, int n, int level)
     } else if (s->in_reset) {
         s->in_reset = false;
         s->asleep = false;
-        s->custom_lut = false;
+        uc8179_reset_regs(s);
         s->cmd = 0;
         s->bits = 0;
         s->rd = NULL;
@@ -282,7 +396,6 @@ static void uc8179_set_rst(void *opaque, int n, int level)
 static void uc8179_update_display(void *opaque)
 {
     Uc8179State *s = opaque;
-    static const uint8_t shade[4] = { 0x10, 0x60, 0xa8, 0xf0 };
     DisplaySurface *surface = qemu_console_surface(s->con);
 
     if (!s->redraw) {
@@ -293,8 +406,7 @@ static void uc8179_update_display(void *opaque)
     int stride = surface_stride(surface) / 4;
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
-            uint8_t byte = s->shown[y][x / 4];
-            uint8_t g = shade[(byte >> (6 - 2 * (x % 4))) & 3];
+            uint8_t g = 0x10 + s->ink[y][x] * 0xe0 / s->swing;
             int dx = s->portrait ? H - 1 - y : x, dy = s->portrait ? x : y;
             d[dy * stride + dx] = rgb_to_pixel32(g, g, g);
         }
@@ -328,7 +440,12 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
         }
     }
     memset(s->ram, 0xff, sizeof(s->ram));
-    memset(s->shown, 0xff, sizeof(s->shown));
+    if (!s->swing) {
+        error_setg(errp, "uc8179: swing-frames must be at least 1");
+        return;
+    }
+    memset(s->ink, s->swing, sizeof(s->ink));
+    uc8179_reset_regs(s);
     s->redraw = true;
     s->con = graphic_console_init(dev, 0, &uc8179_ops, s);
     qemu_console_resize(s->con, s->portrait ? H : W, s->portrait ? W : H);
@@ -344,6 +461,8 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
 static Property uc8179_properties[] = {
     DEFINE_PROP_UINT32("busy-ms", Uc8179State, busy_ms, 300),
     DEFINE_PROP_BOOL("portrait", Uc8179State, portrait, true),
+    /* 6: the vendor gray LUT's black + 2 / + 4 white frames read 1/3 and 2/3 */
+    DEFINE_PROP_UINT8("swing-frames", Uc8179State, swing, 6),
     DEFINE_PROP_END_OF_LIST(),
 };
 
