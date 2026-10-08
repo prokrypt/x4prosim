@@ -265,6 +265,16 @@ static void esp_rgb_realize(DeviceState *dev, Error **errp)
     assert(s->intram != NULL);
     /* Create an address space for internal RAM so that we can read data from it on GUI update */
     address_space_init(&s->intram_as, s->intram, "esp.rgb.intram_as");
+
+    /* Console at realize: a board that never realizes the RGB device gets no window */
+    if (s->con == NULL) {
+        s->con = graphic_console_init(DEVICE(s), 0, &fb_ops, s);
+        /* Resize and use corrent color bpp*/
+        update_rgb_surface(s);
+        void * data = surface_data(qemu_console_surface(s->con));
+        /* Initialize the window to black */
+        memset(data, 0, (s->width * s->height * s->bpp) / 8);
+    }
 }
 
 
@@ -289,15 +299,6 @@ static void esp_rgb_init(Object *obj)
     s->height = ESP_RGB_MAX_HEIGHT;
     s->update_area = false;
     s->bpp = DEFAULT_BPP;
-
-    if (s->con == NULL) {
-        s->con = graphic_console_init(DEVICE(s), 0, &fb_ops, s);
-        /* Resize and use corrent color bpp*/
-        update_rgb_surface(s);
-        void * data = surface_data(qemu_console_surface(s->con));
-        /* Initialize the window to black */
-        memset(data, 0, (s->width * s->height * s->bpp) / 8);
-    }
 
     /* Create a memory region that can be used as a framebuffer by the guest */
     memory_region_init_ram(&s->vram, OBJECT(s), "esp-rgb-vram", ESP_RGB_MAX_VRAM_SIZE, &error_abort);
