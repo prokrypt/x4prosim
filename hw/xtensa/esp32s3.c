@@ -881,6 +881,22 @@ static void esp32s3_machine_init(MachineState *machine)
                                             sysbus_mmio_get_region(SYS_BUS_DEVICE(sens), 0), 1);
     }
 
+    /* x4prosim: I2C0/I2C1. The X4 Pro's board devices sit on I2C0 (SDA 39, SCL 38). */
+    {
+        static const hwaddr i2c_base[] = { DR_REG_I2C_EXT_BASE, DR_REG_I2C1_EXT_BASE };
+        for (int i = 0; i < ARRAY_SIZE(i2c_base); i++) {
+            DeviceState *i2c = qdev_new("esp32s3.i2c");
+            g_autofree char *name = g_strdup_printf("i2c%d", i);
+
+            object_property_add_child(OBJECT(ss), name, OBJECT(i2c));
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(i2c), &error_fatal);
+            memory_region_add_subregion_overlap(sys_mem, i2c_base[i],
+                                                sysbus_mmio_get_region(SYS_BUS_DEVICE(i2c), 0), 1);
+            sysbus_connect_irq(SYS_BUS_DEVICE(i2c), 0,
+                               qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT0_INTR_SOURCE + i));
+        }
+    }
+
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.rmt", DR_REG_RMT_BASE, 0x1000);
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.iomux", DR_REG_IO_MUX_BASE, 0x2000);
 
