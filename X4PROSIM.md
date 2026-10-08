@@ -150,7 +150,41 @@ Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
 | Wi-Fi | not emulated by Espressif QEMU | n/a | open (later) |
 | Sleep | deep sleep + ext0/ext1 GPIO wake, RTC_NOINIT/RTC_DATA memory | RTC_CNTL | open (later) |
 
-## Helper agent task: I2C bus + GT911 + BM8563 + CW2017
+## Helper agent task: GPSPI2 DMA + hardware CS (current)
+
+Goal: firmware that drives the panel with ESP-IDF `spi_master` or Arduino `SPI`
+using DMA and the controller's own CS works like CrossDink's CPU-mode SPI does
+today. Branch `ext/spi-dma` off `x4prosim`, PR into `x4prosim`. You own
+`hw/ssi/esp32s3_gpspi.c` for this task (and its wiring in `x4pro_board_init`).
+
+Starting point: branch **`wip/spi-dma`** (598cb63) has an untested draft. It
+compiles, but nothing has exercised it: GDMA out/in through the `esp_gdma`
+API (`esp_gdma_get_channel_periph(GDMA_SPI2)`, read/write channel), command,
+address and dummy phases, MOSI-only/MISO-only/full-duplex, a `cs0` output
+(CS0_DIS, CS_KEEP_ACTIVE), and the panel CS = GPIO13 AND SPI CS0. Review it
+against the S3 TRM and IDF `hal/esp32s3/include/hal/spi_ll.h` and fix what's wrong.
+
+1. **DMA**: `spi_master` uses GDMA above 64 bytes (`SPI_DMA_CONF` TX/RX enable,
+   GDMA PERI_SEL = 0 for SPI2). Check `esp_gdma_get_channel_periph`: it also
+   matches any started channel, so a second DMA user (AES/SHA) could be picked.
+   GDMA here only reaches internal DRAM; PSRAM buffers (EDMA) are a known gap:
+   either add PSRAM to the GDMA address space or log a guest error.
+2. **Interrupts and status**: TRANS_DONE plus whatever `spi_master`'s ISR and
+   polling path read (check `spi_ll_usr_is_done`, `SPI_DMA_INT_*`, CMD.UPDATE,
+   CMD.USR clearing). Transactions that queue back-to-back must work.
+3. **Hardware CS**: CS0 goes low per transaction unless disabled or kept
+   active. The GPIO matrix isn't modeled; CS0 is wired to the panel as if routed
+   to GPIO13.
+4. **Test firmware**: a minimal ESP-IDF (or Arduino) app in
+   `x4prosim/tests/spi-dma/` that inits the X4 Pro panel pins
+   (SCLK 12, MOSI 11, CS 13 as hardware CS, DC 18, RST 14, BUSY_N 6), sends
+   UC8179 init + a 48000-byte DTM2 plane with one DMA transaction, refreshes
+   (0x12), and prints "done". Commit its source and a build script, not the
+   binary. Done when: `drive.py` screenshot shows the test pattern, and
+   CrossDink 1007e still boots to Home with UC8179 promoted and a key press
+   moving the selection (no regressions).
+
+## Done helper task (merged): I2C bus + GT911 + BM8563 + CW2017
 
 1. **ESP32-S3 I2C controller** `hw/i2c/esp32s3_i2c.c`: start from
    `hw/i2c/esp32_i2c.c` (ESP32 classic) and adapt it to the S3 register map (IDF
@@ -190,8 +224,8 @@ and confirm no new hang (`info registers -a` PCs keep moving).
 
 ## Don'ts
 
-- Don't modify any firmware (CrossDink, freeink-sdk or others). Don't change the GPIO, GPSPI, UC8179, keys or
-  RTC_CNTL models (owned by the project thread); adding your devices' wiring lines to
+- Don't modify any firmware (CrossDink, freeink-sdk or others). Don't change the GPIO, UC8179, keys or
+  RTC_CNTL models (owned by the project thread; GPSPI is yours for the SPI DMA task); adding your devices' wiring lines to
   `x4pro_board_init` is fine. Ask in the PR if you need a hook elsewhere.
 - Don't push to `x4prosim` directly. PRs only.
 - No upstream references in PR titles, bodies or commits (no `#N` pointing at other
