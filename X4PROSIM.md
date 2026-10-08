@@ -144,7 +144,7 @@ Done on `x4prosim`:
   not host speed; without it FreeRTOS can assert after light sleep on a slow host.
   Guest runs slower than real time, so give `wait:` steps generous values.
 - `x4prosim/testdata/`: real device logs, the panel OTP dump, battery history to
-  seed the SD card, measured power numbers. See its README.
+  seed the SD card, estimated power numbers. See its README.
 - `hw/input/x4pro_keys.c`: Up/Down/Power keys (arrow keys + P, or
   `qom-set /machine/x4pro-keys down true`).
 - `hw/misc/esp32s3_rtc_cntl.c`: light sleep: `SLEEP_EN` waits for the RTC timer

@@ -46,23 +46,26 @@ Stats to see the history. To test the battery parser against the raw data:
 python3 -c "import csv; r=list(csv.DictReader(open('x4prosim/testdata/sdcard/debug/logs/battery.csv'))); print(len(r), r[0]['pct'], r[-1]['pct'])"
 ```
 
-## 3. Measured power (reference)
+## 3. Estimated power (reference)
 
-The sim does not model current. Measured on the device (1100 mAh pack), mA:
+The sim does not model current. These are not measurements: the firmware
+estimated them from the fuel gauge's % drop over time in each state. They
+were first computed with a wrong 2000 mAh capacity and are rescaled here to
+the real 1100 mAh pack (x 0.55). Treat them as rough.
 
-| State | mA |
+| State | mA (est.) |
 | --- | --- |
-| idle (light sleep, screen static) | 13 |
-| main loop running | 21 |
-| Wi-Fi on, power save | 26 |
-| frontlight 50% | 54 |
-| CPU busy | 104 |
-| frontlight 100% | 138 |
-| Wi-Fi awake | 199 |
+| idle (light sleep, screen static) | ~7 |
+| main loop running | ~12 |
+| Wi-Fi on, power save | ~14 |
+| frontlight 50% | ~30 |
+| CPU busy | ~57 |
+| frontlight 100% | ~76 |
+| Wi-Fi awake | ~110 |
 
-Frontlight current is about linear in PWM duty (gamma 1.6554, so 50% = 31.7% duty).
+Frontlight current (same estimate) is about linear in PWM duty (gamma 1.6554, so 50% = 31.7% duty).
 
-Battery voltage sag under load: frontlight about −25 mV, Wi-Fi −1.2 mV,
+Battery voltage sag under load (read from the gauge, not capacity-dependent): frontlight about −25 mV, Wi-Fi −1.2 mV,
 CPU −1.0 mV, panel refresh +6 mV.
 
 ## Adding more
