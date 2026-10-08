@@ -4,7 +4,7 @@
  * Models OUT/ENABLE (and W1TS/W1TC), IN, per-pin interrupt type/enable and
  * STATUS for GPIO0..48. Pins that are neither driven from outside ("pin-in"
  * lines) nor enabled as outputs read as 1, as if pulled up. Outputs are
- * reported on "pin-out" lines. The GPIO matrix and IO_MUX are not modeled:
+ * reported on "pin-out" lines (1 while not enabled). The GPIO matrix and IO_MUX are not modeled:
  * the board wiring connects pins directly.
  *
  * Copyright (c) 2023 Espressif Systems (Shanghai) Co. Ltd.
@@ -96,7 +96,8 @@ static void gpio_update(ESP32S3GPIOState *s)
     }
     s->last_in = in;
 
-    uint64_t out = s->out_reg & s->enable;
+    /* A pin that isn't an output floats high (pull-up), so devices see it released. */
+    uint64_t out = (s->out_reg & s->enable) | ~s->enable;
     uint64_t changed = (out ^ s->last_out) & PIN_MASK;
     s->last_out = out;
     for (int i = 0; changed; i++, changed >>= 1) {

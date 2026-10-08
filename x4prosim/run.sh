@@ -8,7 +8,8 @@ img=$1; sd=${2:-sd.img}; shift; [ $# -gt 0 ] && shift
 [ -f "$sd" ] || python3 "$here/x4prosim/mksd.py" "$sd"
 # QEMU writes to the flash image (NVS, OTA data); run a copy to keep the source clean.
 cp "$img" "$img.run"
-exec "$here/build/qemu-system-xtensa" -machine x4pro \
+# -icount: guest time follows instructions (~240 MHz), not host speed, so light-sleep timing can't overshoot.
+exec "$here/build/qemu-system-xtensa" -machine x4pro -icount shift=2,sleep=on \
   -drive file="$img.run",if=mtd,format=raw \
   -drive file="$sd",if=sd,format=raw \
   -chardev stdio,id=cdc,mux=off -serial null \

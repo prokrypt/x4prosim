@@ -89,8 +89,17 @@ Done on `x4prosim`:
   interrupts, named lines `pin-in` (drive a pin from outside), `pin-out` (pin level
   to a device), `wake` (light-sleep GPIO wakeup). Undriven inputs read 1 (pull-up).
 - `hw/ssi/esp32s3_gpspi.c`: GPSPI2 CPU-mode master (W0..W15 buffer, USR, TRANS_DONE).
-- `hw/display/ssd1677.c`: SSD1677 panel on GPSPI2 with CS/DC/RST/BUSY on GPIO,
-  graphic console (shown portrait like the device; `portrait=false` for raw).
+- `hw/display/uc8179.c`: the X4 Pro's UC8179 panel on GPSPI2 with CS/DC/RST and
+  BUSY_N on GPIO, plus the bit-banged SDA reads the firmware uses for its panel
+  probe and OTP. Answers like the real panel (VER, FLG, OTP), so the firmware logs
+  `controller=UC8179 ... promoted=1`. Graphic console shown portrait like the
+  device (`portrait=false` for raw). `hw/display/ssd1677.c` is an unused SSD1677
+  model kept for reference.
+- `-icount shift=2` (set by `run.sh`/`drive.py`): guest time follows instructions,
+  not host speed; without it FreeRTOS can assert after light sleep on a slow host.
+  Guest runs slower than real time, so give `wait:` steps generous values.
+- `x4prosim/testdata/`: real device logs, the panel OTP dump, battery history to
+  seed the SD card, measured power numbers. See its README.
 - `hw/input/x4pro_keys.c`: Up/Down/Power keys (arrow keys + P, or
   `qom-set /machine/x4pro-keys down true`).
 - `hw/misc/esp32s3_rtc_cntl.c`: light sleep: `SLEEP_EN` waits for the RTC timer
@@ -109,7 +118,7 @@ Still missing: I2C (see the helper task below), LEDC frontlight, charger STAT
 
 | Area | Hardware | Pins / bus | Owner |
 | --- | --- | --- | --- |
-| Display | SSD1677 800x480 1-bit e-ink over GPSPI2, write-only, 10 MHz | SCLK 12, MOSI 11, CS 13, DC 18, RST 14, BUSY 6 | done |
+| Display | UC8179 800x480 1-bit e-ink over GPSPI2, 10 MHz; SDA also read bit-banged | SCLK 12, SDA 11, CS 13, DC 18, RST 14, BUSY_N 6 | done |
 | SD | SDMMC slot 1, 1-bit, 40 MHz; GPIO5 = power enable, active-LOW | CLK 41, CMD 42, D0 40 | done |
 | Buttons | active-LOW, pull-up; Up 0 (strap), Down 7, Power 3 | GPIO | done |
 | **I2C bus** | **ESP32-S3 I2C0 controller, 400 kHz** | **SDA 39, SCL 38** | **helper agent** |
@@ -161,7 +170,7 @@ and confirm no new hang (`info registers -a` PCs keep moving).
 
 ## Don'ts
 
-- Don't modify CrossDink or freeink-sdk. Don't change the GPIO, GPSPI, SSD1677, keys or
+- Don't modify CrossDink or freeink-sdk. Don't change the GPIO, GPSPI, UC8179, keys or
   RTC_CNTL models (owned by the project thread); adding your devices' wiring lines to
   `x4pro_board_init` is fine. Ask in the PR if you need a hook elsewhere.
 - Don't push to `x4prosim` directly. PRs only.

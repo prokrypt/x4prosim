@@ -14,11 +14,12 @@ sock = f"/tmp/x4prosim-{os.getpid()}.sock"
 if not os.path.exists(sd):
     subprocess.run([sys.executable, os.path.join(here, "mksd.py"), sd], check=True)
 subprocess.run(["cp", img, img + ".run"], check=True)
-p = subprocess.Popen([qemu, "-machine", "x4pro", "-display", "none", "-serial", "null",
+# icount: guest time follows instructions (~240 MHz), not host speed, so light-sleep timing can't overshoot.
+p = subprocess.Popen([qemu, "-machine", "x4pro", "-icount", "shift=2,sleep=on", "-display", "none", "-serial", "null",
                       "-drive", f"file={img}.run,if=mtd,format=raw", "-drive", f"file={sd},if=sd,format=raw",
                       "-chardev", f"file,id=cdc,path={log}",
                       "-global", "driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc",
-                      "-monitor", f"unix:{sock},server,nowait"],
+                      "-monitor", f"unix:{sock},server,nowait"] + os.environ.get("QEMU_EXTRA", "").split(),
                      stdout=subprocess.DEVNULL, stderr=sys.stderr)
 for _ in range(50):
     if os.path.exists(sock):

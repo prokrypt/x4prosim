@@ -1011,14 +1011,15 @@ static ram_addr_t esp32s3_fixup_ram_size(ram_addr_t requested_size)
 }
 
 /*
- * Xteink X4 Pro board: SSD1677 panel on GPSPI2 (CS 13, DC 18, RST 14,
- * BUSY 6, all through GPIO) and the Up/Down/Power keys (GPIO 0/7/3).
+ * Xteink X4 Pro board: UC8179 panel on GPSPI2 (CS 13, DC 18, RST 14,
+ * BUSY_N 6 through GPIO; SCLK 12 and SDA 11 also bit-banged for reads) and
+ * the Up/Down/Power keys (GPIO 0/7/3).
  */
 static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
 {
     DeviceState *gpio = DEVICE(&ss->gpio);
     SSIBus *bus = (SSIBus *)qdev_get_child_bus(spi2, "spi");
-    DeviceState *panel = qdev_new("ssd1677");
+    DeviceState *panel = qdev_new("uc8179");
     qdev_set_id(panel, g_strdup("panel"), &error_fatal);
     ssi_realize_and_unref(panel, bus, &error_fatal);
 
@@ -1026,7 +1027,11 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 18, qdev_get_gpio_in_named(panel, "dc", 0));
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 14, qdev_get_gpio_in_named(panel, "rst", 0));
     qdev_connect_gpio_out_named(panel, "busy", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 6));
-    qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 6), 0);
+    qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 6), 1);
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 12, qdev_get_gpio_in_named(panel, "sclk", 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 11, qdev_get_gpio_in_named(panel, "sda", 0));
+    qdev_connect_gpio_out_named(panel, "sda-out", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 11));
+    qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 11), 1);
 
     DeviceState *keys = qdev_new("x4pro-keys");
     object_property_add_child(qdev_get_machine(), "x4pro-keys", OBJECT(keys));
