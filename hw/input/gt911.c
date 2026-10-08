@@ -15,10 +15,10 @@
  * the INT wake pulse is invisible here, and the address is fixed rather than
  * strapped by INT at reset.
  *
- * Input is in display coordinates (800x480 landscape) and is mapped to the
- * X4 Pro's portrait digitizer (raw X 0..479, raw Y 0..799, X runs bottom to
- * top). Sources: an absolute pointer (left button = finger, right = Home),
- * and write-only properties for scripts:
+ * Input is in the controller's own coordinates, 480x800 portrait (X right, Y
+ * down), which is how the x4pro panel console shows the screen. Sources: an
+ * absolute pointer (left button = finger, right = Home), and write-only
+ * properties for scripts:
  *   qom-set <path> touch X,Y | up     press/move, or lift
  *   qom-set <path> tap X,Y | home     100 ms tap on the screen or Home key
  *   qom-set <path> home on | off      hold or release Home
@@ -55,8 +55,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(GT911State, GT911)
 #define GT911_STATUS_READY  0x80
 #define GT911_STATUS_KEY    0x10
 
-#define GT911_DISPLAY_W     800
-#define GT911_DISPLAY_H     480
+#define GT911_RES_X         480
+#define GT911_RES_Y         800
 #define GT911_TAP_MS        100
 
 struct GT911State {
@@ -68,7 +68,7 @@ struct GT911State {
     uint8_t regs[GT911_NREGS];
     uint16_t ptr;
     int addr_bytes;     /* register address bytes still to come */
-    /* live input, display coordinates */
+    /* live input */
     bool touch;
     bool key;
     uint16_t x;
@@ -92,8 +92,8 @@ static void gt911_latch(GT911State *s)
                                   (s->key ? GT911_STATUS_KEY : 0) | s->touch;
     memset(pt, 0, 8);
     if (s->touch) {
-        stw_le_p(pt + 1, GT911_DISPLAY_H - 1 - s->y);
-        stw_le_p(pt + 3, s->x);
+        stw_le_p(pt + 1, s->x);
+        stw_le_p(pt + 3, s->y);
         stw_le_p(pt + 5, 0x20);     /* contact size */
     }
     s->changed = false;
@@ -179,10 +179,10 @@ static void gt911_input_event(DeviceState *dev, QemuConsole *src, InputEvent *ev
         move = evt->u.abs.data;
         if (move->axis == INPUT_AXIS_X) {
             s->x = qemu_input_scale_axis(move->value, INPUT_EVENT_ABS_MIN,
-                                         INPUT_EVENT_ABS_MAX, 0, GT911_DISPLAY_W - 1);
+                                         INPUT_EVENT_ABS_MAX, 0, GT911_RES_X - 1);
         } else if (move->axis == INPUT_AXIS_Y) {
             s->y = qemu_input_scale_axis(move->value, INPUT_EVENT_ABS_MIN,
-                                         INPUT_EVENT_ABS_MAX, 0, GT911_DISPLAY_H - 1);
+                                         INPUT_EVENT_ABS_MAX, 0, GT911_RES_Y - 1);
         }
         s->changed |= s->touch;
         break;
@@ -219,9 +219,8 @@ static bool gt911_parse_point(GT911State *s, const char *str, Error **errp)
     char end;
 
     if (sscanf(str, "%u,%u%c", &x, &y, &end) != 2 ||
-        x >= GT911_DISPLAY_W || y >= GT911_DISPLAY_H) {
-        error_setg(errp, "expected X,Y with X < %d and Y < %d",
-                   GT911_DISPLAY_W, GT911_DISPLAY_H);
+        x >= GT911_RES_X || y >= GT911_RES_Y) {
+        error_setg(errp, "expected X,Y with X < %d and Y < %d", GT911_RES_X, GT911_RES_Y);
         return false;
     }
     s->x = x;
@@ -276,11 +275,11 @@ static void gt911_load_regs(GT911State *s)
     memset(s->regs, 0, sizeof(s->regs));
     memcpy(gt911_reg(s, GT911_PRODUCT_ID), "911", 4);
     stw_le_p(gt911_reg(s, GT911_PRODUCT_ID + 4), 0x1060);   /* firmware version */
-    stw_le_p(gt911_reg(s, GT911_PRODUCT_ID + 6), 480);      /* X resolution */
-    stw_le_p(gt911_reg(s, GT911_PRODUCT_ID + 8), 800);      /* Y resolution */
+    stw_le_p(gt911_reg(s, GT911_PRODUCT_ID + 6), GT911_RES_X);
+    stw_le_p(gt911_reg(s, GT911_PRODUCT_ID + 8), GT911_RES_Y);
     *gt911_reg(s, GT911_CONFIG) = 0x41;                     /* config version */
-    stw_le_p(gt911_reg(s, GT911_CONFIG + 1), 480);
-    stw_le_p(gt911_reg(s, GT911_CONFIG + 3), 800);
+    stw_le_p(gt911_reg(s, GT911_CONFIG + 1), GT911_RES_X);
+    stw_le_p(gt911_reg(s, GT911_CONFIG + 3), GT911_RES_Y);
     *gt911_reg(s, GT911_CONFIG + 5) = 5;                    /* max contacts */
     s->ptr = 0;
     s->addr_bytes = 0;
