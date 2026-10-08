@@ -69,6 +69,8 @@
 
 #include "hw/misc/esp32c3_jtag.h"
 #include "hw/display/esp_rgb.h"
+#include "hw/ssi/ssi.h"
+#include "monitor/qdev.h"
 
 #define TYPE_ESP32S3_SOC "xtensa.esp32s3"
 #define ESP32S3_SOC(obj) OBJECT_CHECK(Esp32s3SocState, (obj), TYPE_ESP32S3_SOC)
@@ -320,6 +322,7 @@ struct Esp32s3MachineState {
     DeviceState *flash_dev;
 };
 #define TYPE_ESP32S3_MACHINE MACHINE_TYPE_NAME("esp32s3")
+#define TYPE_X4PRO_MACHINE MACHINE_TYPE_NAME("x4pro")
 
 static void esp32s3_init_openeth(Esp32s3SocState *ms)
 {
@@ -600,6 +603,8 @@ static void esp32s3_soc_add_unimp_device(MemoryRegion *dest, const char* name, h
     g_free(name_apb);
 }
 
+static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2);
+
 static void esp32s3_machine_init(MachineState *machine)
 {
     DriveInfo *dinfo = drive_get(IF_MTD, 0, 0);
@@ -776,6 +781,10 @@ static void esp32s3_machine_init(MachineState *machine)
         sysbus_realize(SYS_BUS_DEVICE(&ss->gpio), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->gpio), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_GPIO_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ss->gpio), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_GPIO_INTR_SOURCE));
+        qdev_connect_gpio_out_named(DEVICE(&ss->gpio), ESP32S3_GPIO_WAKE, 0,
+                                    qdev_get_gpio_in_named(DEVICE(&ss->rtc_cntl), ESP32S3_RTC_GPIO_WAKE, 0));
     }
 
     {
@@ -862,8 +871,10 @@ static void esp32s3_machine_init(MachineState *machine)
         memory_region_add_subregion_overlap(sys_mem, DR_REG_AES_XTS_BASE, mr, 0);
     }
 
-    /* RGB display realization */
-    {
+    /* RGB display realization; the X4 Pro has its own panel, keep it console 0 */
+    if (object_dynamic_cast(OBJECT(machine), TYPE_X4PRO_MACHINE)) {
+        object_unparent(OBJECT(&ss->rgb));
+    } else {
         /* Give the internal RAM memory region to the display */
         ss->rgb.intram = dram;
         sysbus_realize(SYS_BUS_DEVICE(&ss->rgb), &error_fatal);
@@ -879,6 +890,19 @@ static void esp32s3_machine_init(MachineState *machine)
         sysbus_realize_and_unref(SYS_BUS_DEVICE(sens), &error_fatal);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_SENS_BASE,
                                             sysbus_mmio_get_region(SYS_BUS_DEVICE(sens), 0), 1);
+    }
+
+    {
+        DeviceState *spi2 = qdev_new("ssi.esp32s3.gpspi");
+        object_property_add_child(OBJECT(ss), "spi2", OBJECT(spi2));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(spi2), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI2_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(spi2), 0), 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(spi2), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_SPI2_INTR_SOURCE));
+        if (object_dynamic_cast(OBJECT(machine), TYPE_X4PRO_MACHINE)) {
+            x4pro_board_init(ss, spi2);
+        }
     }
 
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.rmt", DR_REG_RMT_BASE, 0x1000);
@@ -986,6 +1010,50 @@ static ram_addr_t esp32s3_fixup_ram_size(ram_addr_t requested_size)
     return size;
 }
 
+/*
+ * Xteink X4 Pro board: SSD1677 panel on GPSPI2 (CS 13, DC 18, RST 14,
+ * BUSY 6, all through GPIO) and the Up/Down/Power keys (GPIO 0/7/3).
+ */
+static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
+{
+    DeviceState *gpio = DEVICE(&ss->gpio);
+    SSIBus *bus = (SSIBus *)qdev_get_child_bus(spi2, "spi");
+    DeviceState *panel = qdev_new("ssd1677");
+    qdev_set_id(panel, g_strdup("panel"), &error_fatal);
+    ssi_realize_and_unref(panel, bus, &error_fatal);
+
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 13, qdev_get_gpio_in_named(panel, SSI_GPIO_CS, 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 18, qdev_get_gpio_in_named(panel, "dc", 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 14, qdev_get_gpio_in_named(panel, "rst", 0));
+    qdev_connect_gpio_out_named(panel, "busy", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 6));
+    qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 6), 0);
+
+    DeviceState *keys = qdev_new("x4pro-keys");
+    object_property_add_child(qdev_get_machine(), "x4pro-keys", OBJECT(keys));
+    static const int key_pins[] = { 0, 7, 3 };
+    for (int k = 0; k < ARRAY_SIZE(key_pins); k++) {
+        qdev_connect_gpio_out(keys, k, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, key_pins[k]));
+    }
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(keys), &error_fatal);
+}
+
+static void x4pro_machine_class_init(ObjectClass *oc, void *data)
+{
+    static GlobalProperty x4pro_globals[] = {
+        { "ssi_psram", "is_octal", "true" },
+    };
+    MachineClass *mc = MACHINE_CLASS(oc);
+    mc->desc = "Xteink X4 Pro (ESP32-S3R8, SSD1677 e-paper)";
+    mc->default_ram_size = 8 * MiB;
+    compat_props_add(mc->compat_props, x4pro_globals, ARRAY_SIZE(x4pro_globals));
+}
+
+static const TypeInfo x4pro_info = {
+    .name = TYPE_X4PRO_MACHINE,
+    .parent = TYPE_ESP32S3_MACHINE,
+    .class_init = x4pro_machine_class_init,
+};
+
 /* Initialize machine type */
 static void esp32s3_machine_class_init(ObjectClass *oc, void *data)
 {
@@ -1008,6 +1076,7 @@ static const TypeInfo esp32s3_info = {
 static void esp32s3_machine_type_init(void)
 {
     type_register_static(&esp32s3_info);
+    type_register_static(&x4pro_info);
 }
 
 type_init(esp32s3_machine_type_init);

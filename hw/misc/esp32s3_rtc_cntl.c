@@ -24,11 +24,103 @@
 static void esp32s3_rtc_update_cpu_stall(Esp32s3RtcCntlState* s);
 static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
 
+
+#define R_SLP_TIMER0        0x04
+#define R_SLP_TIMER1        0x08
+#define R_STATE0            0x18
+#define R_WAKEUP_STATE      0x3C
+#define R_INT_ENA           0x40
+#define R_INT_RAW           0x44
+#define R_INT_ST            0x48
+#define R_INT_CLR           0x4C
+#define R_SLP_WAKEUP_CAUSE  0x130
+#define STATE0_SLEEP_EN     BIT(31)
+#define SLP_TIMER1_ALARM_EN BIT(16)
+#define INT_SLP_WAKEUP      BIT(0)
+#define WAKE_GPIO           BIT(2)
+#define WAKE_TIMER          BIT(3)
+#define LIGHT_SLEEP_EARLY_NS (5 * SCALE_MS)
+
+static void esp32s3_rtc_wake(Esp32s3RtcCntlState *s, uint32_t cause)
+{
+    if (!s->sleeping) {
+        return;
+    }
+    s->sleeping = false;
+    timer_del(&s->sleep_timer);
+    /*
+     * The systimer (esp_timer) keeps counting in QEMU while the guest "sleeps",
+     * but IDF also advances it by the RTC-measured sleep time. Hide the sleep
+     * from the RTC counter so the time is only counted once.
+     */
+    s->time_base_ns += qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->sleep_start_ns;
+    s->state0_reg &= ~STATE0_SLEEP_EN;
+    s->wakeup_cause = cause;
+    s->int_raw |= INT_SLP_WAKEUP;
+    qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
+}
+
+static void esp32s3_rtc_sleep_timer_cb(void *opaque)
+{
+    esp32s3_rtc_wake(opaque, WAKE_TIMER);
+}
+
+/* Light sleep: the CPU spins on INT_RAW until a wake source fires. */
+static void esp32s3_rtc_start_sleep(Esp32s3RtcCntlState *s)
+{
+    uint32_t ena = (s->wakeup_state_reg >> 15) & 0x1ffff;
+    bool timer = (ena & WAKE_TIMER) && (s->slp_timer[1] & SLP_TIMER1_ALARM_EN);
+
+    s->sleeping = true;
+    s->sleep_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if ((ena & WAKE_GPIO) && s->gpio_wake) {
+        esp32s3_rtc_wake(s, WAKE_GPIO);
+        return;
+    }
+    if (timer) {
+        uint64_t target = s->slp_timer[0] | ((uint64_t)(s->slp_timer[1] & 0xffff) << 32);
+        /*
+         * Wake a little early: TCG runs the sleep entry/exit code slower than
+         * silicon, and FreeRTOS asserts if the measured sleep overshoots the
+         * idle time it planned (vTaskStepTick).
+         */
+        int64_t ns = s->time_base_ns + muldiv64(target, NANOSECONDS_PER_SECOND, s->rtc_slowclk_freq)
+                     - LIGHT_SLEEP_EARLY_NS;
+        if (ns > qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)) {
+            timer_mod_ns(&s->sleep_timer, ns);
+            return;
+        }
+        esp32s3_rtc_wake(s, WAKE_TIMER);
+        return;
+    }
+    if (!(ena & WAKE_GPIO)) {
+        /* No wake source we model: don't hang the guest. */
+        esp32s3_rtc_wake(s, 0);
+    }
+}
+
+static void esp32s3_rtc_set_gpio_wake(void *opaque, int n, int level)
+{
+    Esp32s3RtcCntlState *s = opaque;
+    s->gpio_wake = level != 0;
+    if (s->gpio_wake && s->sleeping && (((s->wakeup_state_reg >> 15) & 0x1ffff) & WAKE_GPIO)) {
+        esp32s3_rtc_wake(s, WAKE_GPIO);
+    }
+}
+
 static uint64_t esp32s3_rtc_cntl_read(void *opaque, hwaddr addr, unsigned int size)
 {
     Esp32s3RtcCntlState *s = ESP32S3_RTC_CNTL(opaque);
     uint64_t r = 0;
     switch (addr) {
+    case R_SLP_TIMER0:       r = s->slp_timer[0]; break;
+    case R_SLP_TIMER1:       r = s->slp_timer[1]; break;
+    case R_STATE0:           r = s->state0_reg; break;
+    case R_WAKEUP_STATE:     r = s->wakeup_state_reg; break;
+    case R_INT_ENA:          r = s->int_ena; break;
+    case R_INT_RAW:          r = s->int_raw; break;
+    case R_INT_ST:           r = s->int_raw & s->int_ena; break;
+    case R_SLP_WAKEUP_CAUSE: r = s->wakeup_cause; break;
     case A_RTC_CNTL_OPTIONS0:
         r = s->options0_reg;
         break;
@@ -81,6 +173,23 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
 {
     Esp32s3RtcCntlState *s = ESP32S3_RTC_CNTL(opaque);
     switch (addr) {
+    case R_SLP_TIMER0:   s->slp_timer[0] = value; break;
+    case R_SLP_TIMER1:   s->slp_timer[1] = value; break;
+    case R_WAKEUP_STATE: s->wakeup_state_reg = value; break;
+    case R_INT_ENA:
+        s->int_ena = value;
+        qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
+        break;
+    case R_INT_CLR:
+        s->int_raw &= ~value;
+        qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
+        break;
+    case R_STATE0:
+        s->state0_reg = value;
+        if ((value & STATE0_SLEEP_EN) && !s->sleeping) {
+            esp32s3_rtc_start_sleep(s);
+        }
+        break;
     case A_RTC_CNTL_OPTIONS0:
         if (value & R_RTC_CNTL_OPTIONS0_SW_SYS_RESET_MASK) {
             s->reset_cause[0] = ESP32_SW_SYS_RESET;
@@ -182,6 +291,10 @@ static void esp32s3_rtc_cntl_reset_hold(Object *obj, ResetType type)
     Esp32s3RtcCntlState *s = ESP32S3_RTC_CNTL(obj);
 
     s->time_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->sleeping = false;
+    s->int_raw = 0;
+    s->state0_reg = 0;
+    timer_del(&s->sleep_timer);
 }
 
 static void esp32s3_rtc_cntl_realize(DeviceState *dev, Error **errp)
@@ -201,6 +314,8 @@ static void esp32s3_rtc_cntl_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(sbd), &s->cpu_reset_req[0], ESP32S3_RTC_CPU_RESET_GPIO, ESP32S3_CPU_COUNT);
     qdev_init_gpio_out_named(DEVICE(sbd), &s->cpu_stall_req[0], ESP32S3_RTC_CPU_STALL_GPIO, ESP32S3_CPU_COUNT);
     qdev_init_gpio_out_named(DEVICE(sbd), &s->clk_update, ESP32S3_RTC_CLK_UPDATE_GPIO, 1);
+    qdev_init_gpio_in_named(DEVICE(sbd), esp32s3_rtc_set_gpio_wake, ESP32S3_RTC_GPIO_WAKE, 1);
+    timer_init_ns(&s->sleep_timer, QEMU_CLOCK_VIRTUAL, esp32s3_rtc_sleep_timer_cb, s);
 
     for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
         s->reset_cause[i] = ESP32_POWERON_RESET;

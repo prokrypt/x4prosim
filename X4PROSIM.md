@@ -40,10 +40,11 @@ x4-pro-debug` in a CrossDink checkout), then:
 
 ```sh
 x4prosim/mkflash.sh <CrossDink>/.pio/build/x4-pro-debug flash.bin
-x4prosim/run.sh flash.bin sd.img          # firmware log (USB-CDC) on stdout
+x4prosim/run.sh flash.bin sd.img          # firmware log (USB-CDC) on stdout, SDL window if available
+x4prosim/drive.py flash.bin sd.img log.txt wait:30 shot:home.png   # headless
 ```
 
-`run.sh` creates a 1 GB FAT32 `sd.img` if it doesn't exist. Keep
+`run.sh`/`drive.py` create a 1 GB MBR+FAT32 `sd.img` if it doesn't exist (`x4prosim/mksd.py sd.img 1024 books/` copies a folder in). Keep
 `firmware.elf` beside you for symbols. To find a hang: run with `-s -S`, attach
 `xtensa-esp32s3-elf-gdb firmware.elf` (`target remote :1234`), let it run, Ctrl-C,
 `bt`. Or `info registers -a` on the HMP socket `/tmp/x4prosim-mon.sock` and
@@ -56,26 +57,41 @@ bit, an `ESP_ERR_INVALID_STATE`, or a timeout in the log. Map new devices with
 
 ## Where it stands (2026-10-08, 1007e firmware)
 
+Machine `-machine x4pro` (in `hw/xtensa/esp32s3.c`: `x4pro_board_init`) boots the
+unmodified `x4-pro-debug` image to the Home screen, takes key presses and renders
+the panel.
+
 Done on `x4prosim`:
-- Octal PSRAM 8 MB works (`-global ssi_psram.is_octal=true`, plus a bounds fix).
-- USB Serial/JTAG CDC console: `hw/misc/esp32s3_usb_jtag.c` (log to a chardev,
-  1 kHz SOF so Arduino HWCDC sees a host).
-- RTC SENS/SAR ADC oneshot: `hw/misc/esp32s3_sens.c` (always "done", mid-scale
-  sample) so IDF ADC self-calibration at startup doesn't spin.
-- The firmware boots to its main loop and runs the activity manager and render task.
-  Remaining errors in the log:
-  - `[SD] SDMMC volume mount failed` (the QEMU `dwc_sdmmc` model exists, but the mount fails)
-  - `i2cWriteReadNonStop ... ESP_ERR_INVALID_STATE` every 6 s (no S3 I2C model)
-  - the panel "works" only because BUSY reads 0; there is no GPSPI2 or panel model, so
-    nothing is drawn
+- Octal PSRAM 8 MB (default on `x4pro`), plus a PSRAM bounds fix.
+- `hw/misc/esp32s3_usb_jtag.c`: USB-CDC console (firmware log) to a chardev.
+- `hw/misc/esp32s3_sens.c`: SAR ADC oneshot always "done" (IDF calibration at boot).
+- `hw/gpio/esp32s3_gpio.c`: real GPIO model: OUT/ENABLE/IN, edge/level
+  interrupts, named lines `pin-in` (drive a pin from outside), `pin-out` (pin level
+  to a device), `wake` (light-sleep GPIO wakeup). Undriven inputs read 1 (pull-up).
+- `hw/ssi/esp32s3_gpspi.c`: GPSPI2 CPU-mode master (W0..W15 buffer, USR, TRANS_DONE).
+- `hw/display/ssd1677.c`: SSD1677 panel on GPSPI2 with CS/DC/RST/BUSY on GPIO,
+  graphic console (shown portrait like the device; `portrait=false` for raw).
+- `hw/input/x4pro_keys.c`: Up/Down/Power keys (arrow keys + P, or
+  `qom-set /machine/x4pro-keys down true`).
+- `hw/misc/esp32s3_rtc_cntl.c`: light sleep: `SLEEP_EN` waits for the RTC timer
+  alarm or a GPIO wake, and hides the sleep from the RTC counter so esp_timer
+  isn't advanced twice.
+- SD card: `x4prosim/mksd.py` makes an MBR + FAT32 image (SdFat needs the MBR);
+  the existing `dwc_sdmmc` model mounts it.
+- `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
+  `shot:file.png`, `hmp:cmd`). Example:
+  `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+
+Still missing: I2C (see the helper task below), LEDC frontlight, charger STAT
+(GPIO21 reads 1 = charging), Wi-Fi, deep sleep with ext0/ext1 wake, USB OTG.
 
 ## Hardware to model (X4 Pro pin map, from freeink-sdk BoardConfig.h `XTEINK_X4_PRO`)
 
 | Area | Hardware | Pins / bus | Owner |
 | --- | --- | --- | --- |
-| Display | SSD1677 800x480 1-bit e-ink over GPSPI2, write-only, 10 MHz | SCLK 12, MOSI 11, CS 13, DC 18, RST 14, BUSY 6 | Claude (project thread) |
-| SD | SDMMC slot 1, 1-bit, 40 MHz; GPIO5 = power enable, active-LOW | CLK 41, CMD 42, D0 40 | Claude |
-| Buttons | active-LOW, pull-up; Up 0 (strap), Down 7, Power 3 | GPIO | Claude |
+| Display | SSD1677 800x480 1-bit e-ink over GPSPI2, write-only, 10 MHz | SCLK 12, MOSI 11, CS 13, DC 18, RST 14, BUSY 6 | done |
+| SD | SDMMC slot 1, 1-bit, 40 MHz; GPIO5 = power enable, active-LOW | CLK 41, CMD 42, D0 40 | done |
+| Buttons | active-LOW, pull-up; Up 0 (strap), Down 7, Power 3 | GPIO | done |
 | **I2C bus** | **ESP32-S3 I2C0 controller, 400 kHz** | **SDA 39, SCL 38** | **helper agent** |
 | Touch | **GT911** at 0x5D (alt 0x14), INT 10, RST 4, power-enable GPIO2 active-LOW; reports X 0..480, Y 0..800 (portrait, firmware swaps XY and flips Y); has a capacitive Home key | on I2C | **helper agent** |
 | RTC | **BM8563** (PCF8563-compatible) at 0x51 | on I2C | **helper agent** |
@@ -105,14 +121,14 @@ Done on `x4prosim`:
    the CrossDink `freeink-sdk/` submodule). Done when: the status bar shows the
    configured %.
 4. **GT911** `hw/input/gt911.c`: product ID "911", config at 0x8047.., status 0x814E,
-   points at 0x8150, buffer-status clear on write 0x814E=0, INT pulse on GPIO10 (via
-   a qemu_irq into the S3 GPIO model; expose it as a named GPIO out and connect it in
-   the machine). Touch input: QEMU mouse events (`qemu_input_handler_register`
+   points at 0x8150, buffer-status clear on write 0x814E=0, INT pulse on GPIO10: give
+   the GT911 a named GPIO out and connect it to the GPIO model's `pin-in` line 10 in
+   `x4pro_board_init`. Its power enable is GPIO2 and reset GPIO4: take them from
+   `pin-out` lines 2 and 4. Touch input: QEMU mouse events (`qemu_input_handler_register`
    with absolute pointer) mapped to the 480x800 portrait raw space, plus an HMP/QMP-
    friendly QOM property or `-device` option for scripted taps. The Home key: one
    key code in the GT911 key area (check the freeink-sdk GT911 driver for how it reads
-   it). Respect power: no ACKs while GPIO2 is HIGH (powered off) if the GPIO model lets
-   you read the output level; otherwise always on. Done when: a scripted tap moves
+   it). Respect power: no ACKs while GPIO2 is HIGH (powered off). Done when: a scripted tap moves
    the firmware's selection (the log prints activity/input lines).
 
 Read the freeink-sdk drivers in the CrossDink checkout before modeling:
@@ -125,8 +141,9 @@ and confirm no new hang (`info registers -a` PCs keep moving).
 
 ## Don'ts
 
-- Don't modify CrossDink or freeink-sdk. Don't touch the display, SDMMC or GPIO-input
-  files (owned by the project thread); ask in the PR if you need a hook there.
+- Don't modify CrossDink or freeink-sdk. Don't change the GPIO, GPSPI, SSD1677, keys or
+  RTC_CNTL models (owned by the project thread); adding your devices' wiring lines to
+  `x4pro_board_init` is fine. Ask in the PR if you need a hook elsewhere.
 - Don't push to `x4prosim` directly. PRs only.
 - No upstream references in PR titles, bodies or commits (no `#N` pointing at other
   repos, no `owner/repo#N`, no "fixes/closes" keywords).
