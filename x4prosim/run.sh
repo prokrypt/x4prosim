@@ -14,4 +14,4 @@ exec "$here/build/qemu-system-xtensa" -machine x4pro -icount shift=2,sleep=on \
   -drive file="$sd",if=sd,format=raw \
   -chardev stdio,id=cdc,mux=off -serial null \
   -global driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc \
-  -monitor unix:/tmp/x4prosim-mon.sock,server,nowait "$@"
+  -monitor unix:/tmp/x4prosim-mon.sock,server,nowait -display sdl,show-cursor=on "$@"
