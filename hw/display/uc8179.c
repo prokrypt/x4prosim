@@ -14,9 +14,11 @@
  * Models DTM1 (0x10, old plane) and DTM2 (0x13, new plane) and display
  * refresh (0x12), which holds BUSY_N low for "busy-ms" and then updates a
  * per-pixel ink level (KW mode, plane bit 1 = white):
- *  - PSR (0x00) REG=0, OTP waveform (bodies not dumped, so idealized): every
- *    pixel goes to DTM2, except inside PTIN/PTOUT (0x91/0x92, whole panel; no
- *    0x90 window) where pixels with OLD == NEW are not driven and hold.
+ *  - PSR (0x00) REG=0, OTP waveform (bodies not dumped, so approximated):
+ *    every pixel goes to DTM2. Inside PTIN/PTOUT (0x91/0x92, whole panel; no
+ *    0x90 window) pixels with OLD == NEW are not driven and hold, and the
+ *    others stop "ghost" per mille of a swing short of DTM2, so a fast
+ *    refresh leaves faint traces until a full one.
  *  - REG=1, register LUTs (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK; 6-byte
  *    groups [levels, TP_A..TP_D, RP]): the row chosen by each pixel's OLD/NEW
  *    bits runs frame by frame. Drive = source - VCOM (VDH -> black, VDL ->
@@ -56,6 +58,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(Uc8179State, UC8179)
 #define LUT_GROUPS (LUT_LEN / 6)
 #define PSR_REG 0x20
 #define CDI_N2OCP 0x08
+#define INK_SUB 1024            /* ink steps per LUT frame, for fine ghosts */
+#define INK_MAX(s) ((s)->swing * INK_SUB)
 
 enum { PLANE_OLD, PLANE_NEW };
 
@@ -79,6 +83,7 @@ struct Uc8179State {
     bool partial;           /* between PTIN and PTOUT */
     uint8_t lut[LUT_ROWS][LUT_LEN];
     uint8_t swing;          /* frames of one-way drive for a full black <-> white swing */
+    uint16_t ghost;         /* per mille of a swing an OTP fast refresh falls short */
 
     /* bit-banged SPI on GPIO */
     bool sclk;
@@ -90,7 +95,7 @@ struct Uc8179State {
 
     uint8_t otp[OTP_SIZE];
     uint8_t ram[2][H_ADDR][WB];
-    uint8_t ink[H][W];      /* shown level: 0 black .. swing white */
+    uint16_t ink[H][W];     /* shown level: 0 black .. INK_MAX(s) white */
     bool redraw;
 };
 
@@ -146,14 +151,14 @@ static bool lut_next(LutCursor *c, int *level)
     return false;
 }
 
-/* What a LUT row does to each ink level 0..swing: map[level] = level after. */
-static void uc8179_row_map(Uc8179State *s, int r, uint8_t *map)
+/* What a LUT row does to each ink level 0..INK_MAX: map[level] = level after. */
+static void uc8179_row_map(Uc8179State *s, int r, uint16_t *map)
 {
     static const int drive[4] = { 0, 1, -1, 0 };    /* GND, VDH, VDL, VDHR/float */
     LutCursor src = { .row = s->lut[r] }, com = { .row = s->lut[0] };
     bool vdhr = false;
 
-    for (int i = 0; i <= s->swing; i++) {
+    for (int i = 0; i <= INK_MAX(s); i++) {
         map[i] = i;
     }
     for (;;) {
@@ -165,8 +170,8 @@ static void uc8179_row_map(Uc8179State *s, int r, uint8_t *map)
         vdhr |= ls == 3;
         int d = drive[ls] - drive[lc];     /* > 0 toward black */
         if (d) {
-            for (int i = 0; i <= s->swing; i++) {
-                map[i] = MIN(s->swing, MAX(0, map[i] - d));
+            for (int i = 0; i <= INK_MAX(s); i++) {
+                map[i] = MIN(INK_MAX(s), MAX(0, (int)map[i] - d * INK_SUB));
             }
         }
     }
@@ -180,11 +185,12 @@ static void uc8179_refresh(Uc8179State *s)
     /* LUT row per pixel, indexed by OLD << 1 | NEW: KK, KW, WK, WW */
     static const int row_of[4] = { 4, 2, 3, 1 };
     bool reg = s->psr & PSR_REG;
-    uint8_t map[LUT_ROWS][UINT8_MAX + 1];
+    g_autofree uint16_t *map = reg ? g_new(uint16_t, LUT_ROWS * (INK_MAX(s) + 1)) : NULL;
+    int residue = s->partial ? INK_MAX(s) * s->ghost / 1000 : 0;
 
     if (reg) {
         for (int r = 1; r < LUT_ROWS; r++) {
-            uc8179_row_map(s, r, map[r]);
+            uc8179_row_map(s, r, map + r * (INK_MAX(s) + 1));
         }
     }
     /* The driver streams framebuffer row h-1-i into RAM row i. */
@@ -193,11 +199,11 @@ static void uc8179_refresh(Uc8179State *s)
         for (int x = 0; x < W; x++) {
             int o = (s->ram[PLANE_OLD][r][x / 8] >> (7 - x % 8)) & 1;
             int n = (s->ram[PLANE_NEW][r][x / 8] >> (7 - x % 8)) & 1;
-            uint8_t *w = &s->ink[y][x];
+            uint16_t *w = &s->ink[y][x];
             if (reg) {
-                *w = map[row_of[o << 1 | n]][*w];
+                *w = map[row_of[o << 1 | n] * (INK_MAX(s) + 1) + *w];
             } else if (!s->partial || o != n) {
-                *w = n ? s->swing : 0;
+                *w = n ? INK_MAX(s) - residue : residue;
             }
         }
     }
@@ -406,7 +412,7 @@ static void uc8179_update_display(void *opaque)
     int stride = surface_stride(surface) / 4;
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
-            uint8_t g = 0x10 + s->ink[y][x] * 0xe0 / s->swing;
+            uint8_t g = 0x10 + (s->ink[y][x] * 0xe0 + INK_MAX(s) / 2) / INK_MAX(s);
             int dx = s->portrait ? H - 1 - y : x, dy = s->portrait ? x : y;
             d[dy * stride + dx] = rgb_to_pixel32(g, g, g);
         }
@@ -440,11 +446,16 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
         }
     }
     memset(s->ram, 0xff, sizeof(s->ram));
-    if (!s->swing) {
-        error_setg(errp, "uc8179: swing-frames must be at least 1");
+    if (!s->swing || INK_MAX(s) > UINT16_MAX || s->ghost > 500) {
+        error_setg(errp, "uc8179: swing-frames must be 1..%d and ghost 0..500",
+                   UINT16_MAX / INK_SUB);
         return;
     }
-    memset(s->ink, s->swing, sizeof(s->ink));
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            s->ink[y][x] = INK_MAX(s);
+        }
+    }
     uc8179_reset_regs(s);
     s->redraw = true;
     s->con = graphic_console_init(dev, 0, &uc8179_ops, s);
@@ -463,6 +474,7 @@ static Property uc8179_properties[] = {
     DEFINE_PROP_BOOL("portrait", Uc8179State, portrait, true),
     /* 6: the vendor gray LUT's black + 2 / + 4 white frames read 1/3 and 2/3 */
     DEFINE_PROP_UINT8("swing-frames", Uc8179State, swing, 6),
+    DEFINE_PROP_UINT16("ghost", Uc8179State, ghost, 20),
     DEFINE_PROP_END_OF_LIST(),
 };
 
