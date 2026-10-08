@@ -108,7 +108,10 @@ Done on `x4prosim`:
   model kept for reference.
 - UC8179 ink and ghosting (helper agent; full notes, data and tests in
   `x4prosim/ghosting/README.md`): each refresh (0x12) is simulated frame by frame
-  instead of showing the planes.
+  instead of showing the planes, and plays on screen one frame per `frame-us`
+  of virtual time (full refreshes flash, fast ones paint in). BUSY lasts the
+  frames' length: boot full 1500 ms (device 1493), 50-frame direct gray 1250 ms
+  (device 1189), DU 24 frames 600 ms (device 662).
   - PSR REG picks the waveform per refresh: REG=1 runs the uploaded register LUTs
     (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK); REG=0 runs stand-ins for the
     OTP waveforms (bodies never dumped): fast inside PTIN/PTOUT, full otherwise.
@@ -119,10 +122,16 @@ Done on `x4prosim`:
     ~11%) that fades x0.53 over 6 fast refreshes (device x0.51); menus and gray
     book pages come out clean.
   - Every parameter is `-global uc8179.<name>=N` and 0 turns that mechanism off:
-    `swing-frames` 6, `rail-soft` 100, `otp-fast-frames` 10, `otp-full-frames` 12,
+    `swing-frames` 6, `rail-soft` 100, `otp-fast-frames` 10,
     `otp-hold-drive` 6, `remnant-fast`/`-ms` 30/1000, `remnant-slow`/`-ms`
     10/30000, `bloom` 35, `drift`/`drift-s` 50/1800 (uncalibrated), `frame-us`
-    25000, `busy-ms` 300. Units and what each was fitted to: the notes, 3.4.
+    25000. `otp-full-frames` is 30 (not 0 = off). Units and what each was fitted
+    to: the notes, 3.4.
+  - `busy-ms` 0 derives BUSY from the frames; nonzero fixes it. `animate=false`
+    applies all frames at the DRF (BUSY still lasts the frames), for fast
+    scripted runs. To capture the animation with `drive.py` (a screendump costs
+    ~0.3 s), slow it: `-global uc8179.frame-us=100000`. A DRF during playback
+    finishes the previous refresh first; RST stops it where it is.
   - Ink state is 16 B/pixel (6 MB) and the frame loop runs on QEMU's main loop.
   - Measure: `test/*-steps.txt` replay a scenario with `drive.py`,
     `tools/pepmeasure.py` / `seqmeasure.py` / `hist.py` read the screenshots,
@@ -175,7 +184,7 @@ Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
   a different pin than the X4 Pro's won't reach the device.
 - UC8179: the 0x90 partial window, LUTBD (0x25), VDHR, VCOM_DC value and
   temperature (TSSET) aren't modeled; the OTP waveforms are stand-ins until the
-  full 0xA2 OTP is dumped; BUSY is a fixed `busy-ms`, not frames x frame time.
+  full 0xA2 OTP is dumped.
   Open calibration items: `x4prosim/ghosting/README.md` section 8.
 - Flash encryption and secure boot.
 

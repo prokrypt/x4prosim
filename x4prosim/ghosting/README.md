@@ -1,5 +1,8 @@
 # UC8179 ghosting model: notes, data and tests
 
+Later change: refreshes animate and BUSY follows the frames; `otp-full-frames`
+is now 30 and `busy-ms` 0 (derive). See `refresh-animation.md`.
+
 Notes from the helper agent that turned the UC8179 model from "show the planes"
 into an ink simulation fitted to photos of a real X4 Pro, while running
 CrossDink 968e1a67 (`x4-pro-debug`) under the SDL display. Its eight commits are
