@@ -31,8 +31,10 @@
  *    leak with their time constants; their field opposes it ("remnant-*" is
  *    its steady-state fraction), so the next update lands by history and held
  *    pixels kick back where the last image changed;
- *  - blooming: fringe fields pull each pixel's drive toward its 4 neighbors'
- *    ("bloom" per mille per neighbor), leaving faint edges;
+ *  - blooming: a driven pixel loses part of its drive to fringe fields
+ *    toward 4-neighbors driven differently ("bloom" per mille per neighbor),
+ *    so thin strokes land short; undriven pixels are left alone (their
+ *    field is mostly lateral), which keeps halos from piling up;
  *  - drift: between updates, ink relaxes toward mid gray by at most "drift"
  *    per mille, with time constant "drift-s" since it was last driven.
  * Shown lightness is linear in position (L* from black to white), which puts
@@ -319,7 +321,7 @@ static void uc8179_refresh(Uc8179State *s)
             for (int x = 0; x < W; x++) {
                 Uc8179Ink *k = &s->ink[y * W + x];
                 float d = e[c[x]];
-                if (edges) {
+                if (edges && d) {
                     int nb = 0;
                     nb += x > 0 ? e[c[x - 1]] - e[c[x]] : 0;
                     nb += x < W - 1 ? e[c[x + 1]] - e[c[x]] : 0;
@@ -621,13 +623,13 @@ static Property uc8179_properties[] = {
     /* 6: the vendor gray LUT's black + 2 / + 4 white frames read 1/3 and 2/3 */
     DEFINE_PROP_UINT8("swing-frames", Uc8179State, swing, 6),
     DEFINE_PROP_UINT32("rail-soft", Uc8179State, rail_soft, 100),
-    DEFINE_PROP_UINT8("otp-fast-frames", Uc8179State, otp_fast_frames, 7),
+    DEFINE_PROP_UINT8("otp-fast-frames", Uc8179State, otp_fast_frames, 10),
     DEFINE_PROP_UINT8("otp-full-frames", Uc8179State, otp_full_frames, 12),
-    DEFINE_PROP_UINT32("remnant-fast", Uc8179State, remnant_fast, 60),
+    DEFINE_PROP_UINT32("remnant-fast", Uc8179State, remnant_fast, 30),
     DEFINE_PROP_UINT32("remnant-fast-ms", Uc8179State, remnant_fast_ms, 1000),
-    DEFINE_PROP_UINT32("remnant-slow", Uc8179State, remnant_slow, 30),
+    DEFINE_PROP_UINT32("remnant-slow", Uc8179State, remnant_slow, 10),
     DEFINE_PROP_UINT32("remnant-slow-ms", Uc8179State, remnant_slow_ms, 30000),
-    DEFINE_PROP_UINT32("bloom", Uc8179State, bloom, 15),
+    DEFINE_PROP_UINT32("bloom", Uc8179State, bloom, 35),
     DEFINE_PROP_UINT32("drift", Uc8179State, drift, 50),
     DEFINE_PROP_UINT32("drift-s", Uc8179State, drift_s, 1800),
     DEFINE_PROP_UINT32("frame-us", Uc8179State, frame_us, 25000),
