@@ -7,10 +7,13 @@
  * ready, bit 4 key down, low nibble contact count; a host write clears it)
  * and the first 8-byte point record 0x814F-0x8156. A new frame is latched when
  * input changes and the previous one has been cleared, and again after every
- * clear while a contact or the key is held. Each latch pulses the "int" GPIO.
- * The config is not checked or applied, the sleep command (0x8040 = 5) is
- * ignored because the INT wake pulse is invisible here, and the address is
- * fixed rather than strapped by INT at reset.
+ * clear while a contact or the key is held. "int" idles low and pulses high
+ * on each latch. GPIO inputs "power" (rail on when high) and "rst" (reset
+ * while low) both default to running; while off or in reset the chip NACKs
+ * its address, and leaving that state reloads the registers. The config is
+ * not checked or applied, the sleep command (0x8040 = 5) is ignored because
+ * the INT wake pulse is invisible here, and the address is fixed rather than
+ * strapped by INT at reset.
  *
  * Input is in display coordinates (800x480 landscape) and is mapped to the
  * X4 Pro's portrait digitizer (raw X 0..479, raw Y 0..799, X runs bottom to
@@ -71,6 +74,9 @@ struct GT911State {
     uint16_t x;
     uint16_t y;
     bool changed;       /* live input differs from the latched frame */
+    /* wire levels, not reset with the device */
+    bool power;
+    bool rst;
 };
 
 static uint8_t *gt911_reg(GT911State *s, uint16_t reg)
@@ -94,9 +100,15 @@ static void gt911_latch(GT911State *s)
     qemu_irq_pulse(s->irq);
 }
 
+static bool gt911_running(GT911State *s)
+{
+    return s->power && s->rst;
+}
+
 static void gt911_kick(GT911State *s)
 {
-    if (s->changed && !(*gt911_reg(s, GT911_STATUS) & GT911_STATUS_READY)) {
+    if (gt911_running(s) && s->changed &&
+        !(*gt911_reg(s, GT911_STATUS) & GT911_STATUS_READY)) {
         gt911_latch(s);
     }
 }
@@ -126,6 +138,9 @@ static int gt911_event(I2CSlave *i2c, enum i2c_event event)
 {
     GT911State *s = GT911(i2c);
 
+    if ((event == I2C_START_SEND || event == I2C_START_RECV) && !gt911_running(s)) {
+        return -1;
+    }
     if (event == I2C_START_SEND) {
         s->addr_bytes = 2;
     }
@@ -256,10 +271,8 @@ static void gt911_set_home(Object *obj, bool value, Error **errp)
     gt911_set_input(s, s->touch, value);
 }
 
-static void gt911_reset_hold(Object *obj, ResetType type)
+static void gt911_load_regs(GT911State *s)
 {
-    GT911State *s = GT911(obj);
-
     memset(s->regs, 0, sizeof(s->regs));
     memcpy(gt911_reg(s, GT911_PRODUCT_ID), "911", 4);
     stw_le_p(gt911_reg(s, GT911_PRODUCT_ID + 4), 0x1060);   /* firmware version */
@@ -271,10 +284,51 @@ static void gt911_reset_hold(Object *obj, ResetType type)
     *gt911_reg(s, GT911_CONFIG + 5) = 5;                    /* max contacts */
     s->ptr = 0;
     s->addr_bytes = 0;
+}
+
+static void gt911_set_wires(GT911State *s, bool power, bool rst)
+{
+    bool was_running = gt911_running(s);
+
+    s->power = power;
+    s->rst = rst;
+    if (!was_running && gt911_running(s)) {
+        /* Config self-loads and a finger still down is reported again */
+        gt911_load_regs(s);
+        qemu_irq_lower(s->irq);
+        s->changed = s->touch || s->key;
+        gt911_kick(s);
+    }
+}
+
+static void gt911_power_in(void *opaque, int n, int level)
+{
+    GT911State *s = opaque;
+
+    gt911_set_wires(s, level, s->rst);
+}
+
+static void gt911_rst_in(void *opaque, int n, int level)
+{
+    GT911State *s = opaque;
+
+    gt911_set_wires(s, s->power, level);
+}
+
+static void gt911_reset_hold(Object *obj, ResetType type)
+{
+    GT911State *s = GT911(obj);
+
+    gt911_load_regs(s);
     s->touch = false;
     s->key = false;
     s->changed = false;
     timer_del(s->tap_timer);
+}
+
+static void gt911_reset_exit(Object *obj, ResetType type)
+{
+    qemu_irq_lower(GT911(obj)->irq);
 }
 
 static void gt911_realize(DeviceState *dev, Error **errp)
@@ -298,7 +352,11 @@ static void gt911_init(Object *obj)
 {
     GT911State *s = GT911(obj);
 
+    s->power = true;
+    s->rst = true;
     qdev_init_gpio_out_named(DEVICE(obj), &s->irq, "int", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), gt911_power_in, "power", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), gt911_rst_in, "rst", 1);
 }
 
 static void gt911_class_init(ObjectClass *klass, void *data)
@@ -313,6 +371,7 @@ static void gt911_class_init(ObjectClass *klass, void *data)
     sc->recv = gt911_recv;
     sc->send = gt911_send;
     rc->phases.hold = gt911_reset_hold;
+    rc->phases.exit = gt911_reset_exit;
     object_class_property_add_str(klass, "touch", NULL, gt911_set_touch);
     object_class_property_add_str(klass, "tap", NULL, gt911_set_tap);
     object_class_property_add_bool(klass, "home", gt911_get_home, gt911_set_home);

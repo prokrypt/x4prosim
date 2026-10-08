@@ -1039,7 +1039,8 @@ static DeviceState *x4pro_add_i2c(I2CBus *bus, const char *type, uint8_t addr)
 /*
  * Xteink X4 Pro board: SSD1677 panel on GPSPI2 (CS 13, DC 18, RST 14,
  * BUSY 6, all through GPIO), the Up/Down/Power keys (GPIO 0/7/3), and on
- * I2C0 (SDA 39, SCL 38) the GT911 touch, BM8563 RTC and CW2017 gauge.
+ * I2C0 (SDA 39, SCL 38) the GT911 touch (INT 10, RST 4, power enable GPIO2
+ * active-low), BM8563 RTC and CW2017 gauge.
  */
 static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
 {
@@ -1065,9 +1066,13 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
 
     DeviceState *i2c0 = DEVICE(object_resolve_path_component(OBJECT(ss), "i2c0"));
     I2CBus *i2c = I2C_BUS(qdev_get_child_bus(i2c0, "i2c"));
-    x4pro_add_i2c(i2c, "gt911", 0x5d);
+    DeviceState *touch = x4pro_add_i2c(i2c, "gt911", 0x5d);
     x4pro_add_i2c(i2c, "bm8563", 0x51);
     x4pro_add_i2c(i2c, "cw2017", 0x63);
+    qdev_connect_gpio_out_named(touch, "int", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 10));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 2,
+                                qemu_irq_invert(qdev_get_gpio_in_named(touch, "power", 0)));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 4, qdev_get_gpio_in_named(touch, "rst", 0));
 }
 
 static void x4pro_machine_class_init(ObjectClass *oc, void *data)
