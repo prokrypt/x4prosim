@@ -1,13 +1,16 @@
 # x4prosim: instructions for helper agents
 
-x4prosim is a fork of Espressif's QEMU (`esp-develop`) that runs the **unmodified**
-CrossDink firmware for the **Xteink X4 Pro** (ESP32-S3R8, 16 MB flash, 8 MB octal
-PSRAM). The goal is to run the real `x4-pro-debug` binary and see the screen, the SD
-card and inputs working, so firmware can be tested without the physical device.
+x4prosim is a fork of Espressif's QEMU (`esp-develop`) that simulates the **Xteink
+X4 Pro** (ESP32-S3R8, 16 MB flash, 8 MB octal PSRAM) closely enough to run **any
+unmodified X4 Pro firmware**: the stock firmware, CrossInk, CrossDink, or a bare
+ESP-IDF/Arduino app. The goal is firmware development without the physical device:
+the screen, SD card, keys, touch, clock and battery behave like the board.
 
-Rule zero: **never change the firmware to make it boot in QEMU.** Model the hardware
-instead. Firmware lives in `prokrypt/CrossDink` (read-only for you; don't open PRs
-or push there).
+Rule zero: **never change a firmware to make it boot in QEMU.** Model the hardware
+instead, from the datasheets and the board, not from one firmware's driver: another
+firmware may use the same chip differently (hardware SPI CS, DMA, other panel
+commands). CrossDink (`prokrypt/CrossDink`, read-only for you) is the reference
+firmware for testing because its drivers are readable and it logs a lot.
 
 ## Repo, branches, workflow
 
@@ -35,8 +38,16 @@ mkdir build && cd build
 ninja qemu-system-xtensa
 ```
 
-Firmware image: build CrossDink env `x4-pro-debug` with PlatformIO (`pio run -e
-x4-pro-debug` in a CrossDink checkout), then:
+Firmware image: any 16 MB X4 Pro flash image. Three ways to get one:
+- A dump of a real device: `esptool.py --chip esp32s3 read_flash 0 0x1000000 flash.bin`
+  (works only if the device doesn't use flash encryption).
+- A PlatformIO or ESP-IDF build: `x4prosim/mkflash.sh <build dir> flash.bin` merges
+  `bootloader.bin`, `partitions.bin` and the app (`firmware.bin`, or the only other
+  `.bin`) at 0x0/0x8000/0x10000.
+- A single app `.bin` released as an OTA update: flash a bootloader and partition
+  table first (from any build), then the app at 0x10000.
+
+CrossDink example: `pio run -e x4-pro-debug` in a CrossDink checkout, then:
 
 ```sh
 x4prosim/mkflash.sh <CrossDink>/.pio/build/x4-pro-debug flash.bin
@@ -46,7 +57,7 @@ x4prosim/drive.py flash.bin sd.img log.txt wait:30 shot:home.png   # headless
 
 `run.sh`/`drive.py` create a 1 GB MBR+FAT32 `sd.img` if it doesn't exist (`x4prosim/mksd.py sd.img 1024 books/` copies a folder in). Keep
 
-### Firmware build gotchas (PlatformIO, pioarduino 6.1.19)
+### CrossDink build gotchas (PlatformIO, pioarduino 6.1.19)
 
 - **`ModuleNotFoundError: No module named 'SCons.Tool.FortranCommon'`** at the
   `firmware.elf` link step: the `tool-scons` package is half-installed. Delete it
@@ -111,8 +122,17 @@ Done on `x4prosim`:
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
 
-Still missing: LEDC frontlight, charger STAT
-(GPIO21 reads 1 = charging), Wi-Fi, deep sleep with ext0/ext1 wake, USB OTG.
+Still missing: LEDC frontlight, charger STAT (GPIO21 reads 1 = charging), Wi-Fi,
+deep sleep with ext0/ext1 wake, USB OTG.
+
+Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
+- GPSPI: DMA transfers (IDF `spi_master` uses DMA above 64 bytes), hardware CS,
+  command/address/dummy phases, and half-duplex reads on SDA.
+- GPIO matrix / IO_MUX routing: pins are wired directly, so a peripheral routed to
+  a different pin than the X4 Pro's won't reach the device.
+- UC8179: partial window (0x90/0x91/0x92), register LUT waveforms (shown as 4 gray
+  levels, not simulated), and timing (refresh BUSY is a fixed `busy-ms`).
+- Flash encryption and secure boot.
 
 ## Hardware to model (X4 Pro pin map, from freeink-sdk BoardConfig.h `XTEINK_X4_PRO`)
 
@@ -170,7 +190,7 @@ and confirm no new hang (`info registers -a` PCs keep moving).
 
 ## Don'ts
 
-- Don't modify CrossDink or freeink-sdk. Don't change the GPIO, GPSPI, UC8179, keys or
+- Don't modify any firmware (CrossDink, freeink-sdk or others). Don't change the GPIO, GPSPI, UC8179, keys or
   RTC_CNTL models (owned by the project thread); adding your devices' wiring lines to
   `x4pro_board_init` is fine. Ask in the PR if you need a hook elsewhere.
 - Don't push to `x4prosim` directly. PRs only.
