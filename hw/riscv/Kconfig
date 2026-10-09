@@ -119,6 +119,12 @@ config RISCV_ESP32C3
     select OPENCORES_ETH
     select UNIMP
     select ESP_RGB
+    select SSI
+    select SSI_SD
+    select I2C
+    select BQ27220
+    select DS3231
+    select QMI8658
 
 config RISCV_ESP32C6
     bool

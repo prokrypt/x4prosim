@@ -64,6 +64,7 @@ struct ssi_sd_state {
     int32_t arglen;
     int32_t response_pos;
     int32_t stopping;
+    bool idle;          /* R1 idle bit of the last status, for R3/R7 */
     SDBus sdbus;
 };
 
@@ -128,6 +129,7 @@ static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
         }
     }
 
+dispatch:
     switch (s->mode) {
     case SSI_SD_CMD:
         switch (val) {
@@ -180,8 +182,21 @@ static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
                 /* CMD8/CMD58 returns R3/R7 response */
                 DPRINTF("Returned R3/R7\n");
                 s->arglen = 5;
-                s->response[0] = 1;
+                /*
+                 * x4prosim: R1's idle bit follows the card: CMD58 after
+                 * ACMD41 has completed answers 0x00, which SdFat requires.
+                 */
+                s->response[0] = s->idle ? 1 : 0;
                 memcpy(&s->response[1], longresp, 4);
+            } else if (s->cmd == 13 && s->arglen == 16) {
+                /*
+                 * x4prosim: the SD core answers SEND_STATUS with the CSD; the
+                 * SPI R2 is the idle bit and a clean error byte (SdFat checks
+                 * it after every single-block write).
+                 */
+                s->arglen = 2;
+                s->response[0] = s->idle ? 1 : 0;
+                s->response[1] = 0;
             } else if (s->arglen != 4) {
                 BADF("Unexpected response to cmd %d\n", s->cmd);
                 /* Illegal command is about as near as we can get.  */
@@ -236,6 +251,7 @@ static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
                     status |= SSI_SDR_PARAMETER_ERROR;
                 s->response[0] = status >> 8;
                 s->response[1] = status;
+                s->idle = (status & SSI_SDR_IDLE) != 0;
                 DPRINTF("Card status 0x%02x\n", status);
             }
             s->mode = SSI_SD_PREP_RESP;
@@ -261,11 +277,16 @@ static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
         if (sdbus_data_ready(&s->sdbus)) {
             DPRINTF("Data read\n");
             s->mode = SSI_SD_DATA_START;
-        } else {
-            DPRINTF("End of command\n");
-            s->mode = SSI_SD_CMD;
+            return SSI_DUMMY;
         }
-        return SSI_DUMMY;
+        DPRINTF("End of command\n");
+        s->mode = SSI_SD_CMD;
+        /*
+         * x4prosim: this byte already belongs to the host's next transfer. A
+         * write's data token may follow the R1 response without a fill byte
+         * (SdFat does that), so take it as a command/token, not as a dummy.
+         */
+        goto dispatch;
     case SSI_SD_PREP_DATA:
         DPRINTF("Prepare data block (Nac)\n");
         s->mode = SSI_SD_DATA_START;
@@ -387,6 +408,7 @@ static void ssi_sd_reset(DeviceState *dev)
     s->arglen = 0;
     s->response_pos = 0;
     s->stopping = 0;
+    s->idle = true;
 }
 
 static void ssi_sd_class_init(ObjectClass *klass, void *data)

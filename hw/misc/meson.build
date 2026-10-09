@@ -1,5 +1,7 @@
 system_ss.add(when: 'CONFIG_APPLESMC', if_true: files('applesmc.c'))
 system_ss.add(when: 'CONFIG_CW2017', if_true: files('cw2017.c'))
+system_ss.add(when: 'CONFIG_BQ27220', if_true: files('bq27220.c'))
+system_ss.add(when: 'CONFIG_QMI8658', if_true: files('qmi8658.c'))
 system_ss.add(when: 'CONFIG_EDU', if_true: files('edu.c'))
 system_ss.add(when: 'CONFIG_FW_CFG_DMA', if_true: files('vmcoreinfo.c'))
 system_ss.add(when: 'CONFIG_ISA_DEBUG', if_true: files('debugexit.c'))
@@ -154,6 +156,15 @@ system_ss.add(when: 'CONFIG_RISCV_ESP32C3', if_true: files(
   'esp_sha.c',
   'esp32c3_sha.c',
   'esp32c3_jtag.c',
+  'esp32s3_usb_jtag.c',
+  'esp32c3_saradc.c',
+  'esp32s3_regstub.c',
+  'esp32s3_ana.c',
+  'esp32_fe.c',
+  'esp32s3_wifi.c',
+  'esp32_phya.c',
+  'esp32_wifi_ap.c',
+  'esp32_wlan_packet.c',
   'esp32c3_rtc_cntl.c',
   'esp_hmac.c',
   'esp32c3_hmac.c'

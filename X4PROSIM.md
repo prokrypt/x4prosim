@@ -3,7 +3,8 @@
 x4prosim is a fork of Espressif's QEMU (`esp-develop`) that simulates the **Xteink
 X4 Pro** (ESP32-S3R8, 16 MB flash, 8 MB octal PSRAM) closely enough to run **any
 unmodified X4 Pro firmware**: the stock firmware, CrossInk, CrossDink, or a bare
-ESP-IDF/Arduino app. The goal is firmware development without the physical device:
+ESP-IDF/Arduino app. It also simulates the **Xteink X3** (ESP32-C3; see the X3
+section) for the CrossPoint X3/X4 binary. The goal is firmware development without the physical device:
 the screen, SD card, keys, touch, clock and battery behave like the board.
 
 Rule zero: **never change a firmware to make it boot in QEMU.** Model the hardware
@@ -33,10 +34,12 @@ firmware for testing because its drivers are readable and it logs a lot.
 sudo apt install ninja-build libglib2.0-dev libpixman-1-dev libgcrypt20-dev \
   libslirp-dev libsdl2-dev dosfstools python3-pip && pip install esptool
 mkdir build && cd build
-../configure --target-list=xtensa-softmmu --enable-gcrypt --enable-slirp --enable-sdl \
+../configure --target-list=xtensa-softmmu,riscv32-softmmu --enable-gcrypt --enable-slirp --enable-sdl \
   --disable-strip --disable-user --disable-capstone --disable-vnc --disable-gtk --disable-docs
-ninja qemu-system-xtensa
+ninja qemu-system-xtensa qemu-system-riscv32
 ```
+macOS: `brew install glib pixman ninja libgcrypt libslirp sdl2 dosfstools mtools`
+and add `--disable-gnutls` if gnutls isn't installed.
 
 Firmware image: any 16 MB X4 Pro flash image. Three ways to get one:
 - A dump of a real device: `esptool.py --chip esp32s3 read_flash 0 0x1000000 flash.bin`
@@ -187,6 +190,54 @@ Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
   full 0xA2 OTP is dumped.
   Open calibration items: `x4prosim/ghosting/README.md` section 8.
 - Flash encryption and secure boot.
+
+## Xteink X3 (`-machine x3`, ESP32-C3)
+
+The X3 is a different SoC: ESP32-C3 (RISC-V, 400 KB SRAM, no PSRAM), so it is a
+second machine in `hw/riscv/esp32c3.c` (`x3_board_init`), built as
+`qemu-system-riscv32`. `run.sh`, `drive.py` and `mkflash.sh` pick the machine
+from the image's chip (byte 12 of the bootloader header), `X4MACHINE=x3|x4pro`
+overrides. It runs the unmodified CrossPoint `crosspoint-<ver>-x3-x4.bin` (the dual
+X3/X4 C3 binary) to Home, Library and Settings, with key presses, the battery from
+the gauge and the SD card readable and writable. Hardware (freeink-sdk
+`BoardConfig.h` `XTEINK_X3` / `XTEINK_X3_UC8279`):
+
+| Area | Hardware | Pins / bus | Model |
+| --- | --- | --- | --- |
+| SoC blocks | the S3 models fit the C3's register maps: GPIO (`esp32s3_gpio.c`), GPSPI2 (`esp32s3_gpspi.c`), I2C0 (`esp32s3_i2c.c`), USB-CDC console (`esp32s3_usb_jtag.c`) | | wired for every C3 machine |
+| Display | UC8279d 792x528 (newer units) or UC8253 (older), SPI 10 MHz, VER probed bit-banged | SCLK 8, SDA 10, CS 21, DC 4, RST 5, BUSY_N 6 | `hw/display/uc8279.c`; `-global uc8279.uc8253=true` for the old run (VER floats, UC8253 LUT format) |
+| SD | SPI mode on the same bus, SdFat; GPIO13 = rail enable | MISO 7, CS 12 | QEMU `ssi-sd` + `sd-card-spi`, `-drive if=sd` |
+| Keys | ADC ladder: Back/Confirm/Left/Right on GPIO1 (ADC1 ch1), Up/Down on GPIO2 (ch2), raw 3512/2694/1493/5 and 2242/5, idle 4095; Power GPIO3 active-LOW | SAR ADC | `hw/misc/esp32c3_saradc.c` (one-shot), `hw/input/x3_keys.c`: arrows, Enter, Backspace/Esc, P; `qom-set /machine/x3-keys confirm true` |
+| Fuel gauge | BQ27220 at 0x55: Voltage, Current, SOC, DesignCapacity, CFGUPDATE flow | I2C0 SDA 20, SCL 0 | `hw/misc/bq27220.c`: `-global bq27220.soc=80,voltage-mv=3900,current-ma=-80` (Current > 0 = USB power: the firmware goes back to sleep at boot) |
+| RTC | DS3231 at 0x68 | I2C0 | `hw/rtc/ds3231.c`, host clock (UTC) |
+| IMU | QMI8658 at 0x6B (WHO_AM_I 0x05) | I2C0 | `hw/misc/qmi8658.c`, lying flat, at rest |
+| Sleep | no light sleep in CrossPoint; deep sleep with GPIO3 wake, RTC timer | RTC_CNTL | `esp32c3_rtc_cntl.c`: RTC timer, light sleep (timer/GPIO), deep sleep = reset with reason DEEPSLEEP and the wake cause |
+| Wi-Fi | MAC + fake open AP bridged to `-nic user` | n/a | the S3 models at the same bases (`esp32s3_wifi.c`, `esp32s3_ana.c`, `esp32_fe.c`) |
+
+Notes:
+- The panel model is simpler than the UC8179's: the register LUTs move the ink per
+  phase ((frames - `dead-frames`) / `swing-frames` of the way, so a one-frame
+  balance pulse does nothing), BUSY_N lasts the LUT's frames x `frame-us`
+  (GC 53 frames = 1060 ms, DU 20 = 400 ms, device ~1.1 s / ~0.4 s), no animation,
+  no ghosting. The partial window (0x90) and TRES are honored.
+- A cold boot needs the power button held (the firmware re-sleeps otherwise):
+  `x3-keys.power-boot-ms` (default 1500) holds it from reset.
+- CrossPoint up to 1.6.5 deadlocks on a first boot whose NVS has no cached device
+  type: the X3 fingerprint probe runs `Wire.begin/end`, then `getWakeupReason`
+  reads the gauge through raw `Wire` calls with the bus down, and the failed
+  `endTransmission` keeps the Wire lock, so the IMU init blocks forever. A device
+  that has booted once has `cphw/dev_det` in NVS and skips the probe, which is why
+  nobody sees it. `mkflash.sh` seeds exactly that key (`mknvs.py`) on C3 images.
+- `mksd.py` needs `mkfs.vfat` and `mcopy` (`brew install dosfstools mtools`; the
+  build needs `brew install libslirp` too).
+- `hw/sd/ssi-sd.c` fixes for SdFat: R3/R7 carry the real idle bit (CMD58 after
+  ACMD41 is 0x00), a write's data token right after R1 is taken (no fill byte),
+  CMD13 answers an SPI R2.
+- Wi-Fi: the S3's radio models (regstub, ana, fe, Wi-Fi MAC with the fake AP) are
+  wired for every C3 machine too; `run.sh` adds the NIC like on the X4 Pro. SYSCON's
+  first 0x20 bytes are a register stub so the PHY's clock-enable assert passes
+  (Settings > Manage Fonts starts Wi-Fi and crashed on it).
+- Not modeled: the frontlight (the X3 has none), USB MSC, flash encryption.
 
 ## Hardware to model (X4 Pro pin map, from freeink-sdk BoardConfig.h `XTEINK_X4_PRO`)
 

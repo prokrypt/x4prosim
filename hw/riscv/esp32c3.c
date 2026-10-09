@@ -33,6 +33,15 @@
 #include "hw/misc/esp32c3_cache.h"
 #include "hw/char/esp32c3_uart.h"
 #include "hw/gpio/esp32c3_gpio.h"
+#include "hw/gpio/esp32s3_gpio.h"
+#include "hw/i2c/i2c.h"
+#include "hw/sd/sd.h"
+#include "hw/ssi/ssi.h"
+#include "monitor/qdev.h"
+#include "qapi/qmp/qlist.h"
+#include "hw/misc/esp32s3_ana.h"
+#include "hw/misc/esp32_fe.h"
+#include "hw/misc/esp32_wifi.h"
 #include "hw/nvram/esp32c3_efuse.h"
 #include "hw/riscv/esp32c3_clk.h"
 #include "hw/riscv/esp32c3_intmatrix.h"
@@ -72,7 +81,7 @@ struct Esp32C3MachineState {
     DeviceState *eth; /* Ethernet controller */
     ESP32C3IntMatrixState intmatrix;
     ESP32C3UARTState uart[ESP32C3_UART_COUNT];
-    ESP32C3GPIOState gpio;
+    ESP32S3GPIOState gpio;      /* x4prosim: the S3 model, same register map, real pins */
     ESP32C3CacheState cache;
     ESP32C3EfuseState efuse;
     ESP32C3ClockState clock;
@@ -87,7 +96,10 @@ struct Esp32C3MachineState {
     ESP32C3SysTimerState systimer;
     ESP32C3SpiState spi1;
     ESP32C3RtcCntlState rtccntl;
-    ESP32C3UsbJtagState jtag;
+    DeviceState *jtag;          /* x4prosim: the S3 model, a CDC console on a chardev */
+    DeviceState *spi2;
+    DeviceState *i2c0;
+    DeviceState *saradc;
     ESPRgbState rgb;
     Esp32C3TWAIState twai;
 };
@@ -102,6 +114,7 @@ struct Esp32C3MachineState {
 
 /* Create a macro which defines the name of our new machine class */
 #define TYPE_ESP32C3_MACHINE MACHINE_TYPE_NAME("esp32c3")
+#define TYPE_X3_MACHINE MACHINE_TYPE_NAME("x3")
 
 /* This will create a macro ESP32_MACHINE, which can be used to check and cast a generic MachineClass
  * to the specific class we defined above: Esp32C3MachineState. */
@@ -323,6 +336,8 @@ static void esp32c3_load_firmware(MachineState *machine)
 }
 
 
+static void x3_board_init(Esp32C3MachineState *ms);
+
 static void esp32c3_machine_init(MachineState *machine)
 {
     /* First thing to do is to check if a drive format and a file ahve been passed through the command line.
@@ -405,7 +420,8 @@ static void esp32c3_machine_init(MachineState *machine)
     }
 
     object_initialize_child(OBJECT(machine), "intmatrix", &ms->intmatrix, TYPE_ESP32C3_INTMATRIX);
-    object_initialize_child(OBJECT(machine), "gpio", &ms->gpio, TYPE_ESP32C3_GPIO);
+    object_initialize_child(OBJECT(machine), "gpio", &ms->gpio, TYPE_ESP32S3_GPIO);
+    qdev_prop_set_uint32(DEVICE(&ms->gpio), "strap_mode", ESP32C3_STRAP_MODE_FLASH_BOOT);
     object_initialize_child(OBJECT(machine), "extmem", &ms->cache, TYPE_ESP32C3_CACHE);
     object_initialize_child(OBJECT(machine), "efuse", &ms->efuse, TYPE_ESP32C3_EFUSE);
     object_initialize_child(OBJECT(machine), "clock", &ms->clock, TYPE_ESP32C3_CLOCK);
@@ -421,7 +437,8 @@ static void esp32c3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "systimer", &ms->systimer, TYPE_ESP32C3_SYSTIMER);
     object_initialize_child(OBJECT(machine), "spi1", &ms->spi1, TYPE_ESP32C3_SPI);
     object_initialize_child(OBJECT(machine), "rtccntl", &ms->rtccntl, TYPE_ESP32C3_RTC_CNTL);
-    object_initialize_child(OBJECT(machine), "jtag", &ms->jtag, TYPE_ESP32C3_JTAG);
+    ms->jtag = qdev_new("misc.esp32s3.usb_serial_jtag");
+    object_property_add_child(OBJECT(machine), "jtag", OBJECT(ms->jtag));
     object_initialize_child(OBJECT(machine), "rgb", &ms->rgb, TYPE_ESP_RGB);
     object_initialize_child(OBJECT(machine), "twai", &ms->twai, TYPE_ESP32C3_TWAI);
 
@@ -450,9 +467,11 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* USB Serial JTAG realization */
     {
-        sysbus_realize(SYS_BUS_DEVICE(&ms->jtag), &error_fatal);
-        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->jtag), 0);
-        memory_region_add_subregion_overlap(sys_mem, DR_REG_USB_SERIAL_JTAG_BASE, mr, 0);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ms->jtag), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(ms->jtag), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_USB_SERIAL_JTAG_BASE, mr, 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ms->jtag), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_USB_SERIAL_JTAG_INTR_SOURCE));
     }
 
     /* RTC CNTL realization */
@@ -463,6 +482,8 @@ static void esp32c3_machine_init(MachineState *machine)
         /* Connect CNTL's reset-request GPIO to the SoC's reset GPIO */
         qdev_connect_gpio_out_named(DEVICE(&ms->rtccntl), ESP32C3_RTC_CPU_RESET_GPIO, 0,
                                     qdev_get_gpio_in_named(DEVICE(&ms->soc), ESP32C3_RESET_GPIO_NAME, 0));
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ms->rtccntl), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_RTC_CORE_INTR_SOURCE));
     }
 
     /* SPI1 controller (SPI Flash) */
@@ -489,7 +510,38 @@ static void esp32c3_machine_init(MachineState *machine)
     {
         sysbus_realize(SYS_BUS_DEVICE(&ms->gpio), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->gpio), 0);
-        memory_region_add_subregion_overlap(sys_mem, DR_REG_GPIO_BASE, mr, 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_GPIO_BASE, mr, 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ms->gpio), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_GPIO_INTR_SOURCE));
+        qdev_connect_gpio_out_named(DEVICE(&ms->gpio), ESP32S3_GPIO_WAKE, 0,
+                                    qdev_get_gpio_in_named(DEVICE(&ms->rtccntl), ESP32C3_RTC_GPIO_WAKE, 0));
+    }
+
+    /* x4prosim: GPSPI2, I2C0 and the SAR ADC (the S3 models fit the C3's register maps) */
+    {
+        ms->spi2 = qdev_new("ssi.esp32s3.gpspi");
+        object_property_add_child(OBJECT(machine), "spi2", OBJECT(ms->spi2));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ms->spi2), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI2_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(ms->spi2), 0), 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ms->spi2), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_SPI2_INTR_SOURCE));
+
+        ms->i2c0 = qdev_new("esp32s3.i2c");
+        object_property_add_child(OBJECT(machine), "i2c0", OBJECT(ms->i2c0));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ms->i2c0), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_I2C_EXT_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(ms->i2c0), 0), 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ms->i2c0), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_I2C_EXT0_INTR_SOURCE));
+
+        ms->saradc = qdev_new("misc.esp32c3.saradc");
+        object_property_add_child(OBJECT(machine), "saradc", OBJECT(ms->saradc));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ms->saradc), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_APB_SARADC_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(ms->saradc), 0), 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(ms->saradc), 0,
+                           qdev_get_gpio_in(intmatrix_dev, ETS_APB_ADC_INTR_SOURCE));
     }
 
     /* (Extmem) Cache realization */
@@ -656,6 +708,134 @@ static void esp32c3_machine_init(MachineState *machine)
     memory_region_add_subregion_overlap(sys_mem, DR_REG_TWAI_BASE, twai_mr, 0);
     sysbus_connect_irq(SYS_BUS_DEVICE(&ms->twai), 0,
                        qdev_get_gpio_in(DEVICE(&ms->intmatrix), ETS_TWAI_INTR_SOURCE));
+
+    /*
+     * x4prosim: radio, as on the S3 machine (the models came from an ESP32-C3
+     * port, so the register bases are the C3's). SYSCON's clock/reset enables
+     * read back (the PHY asserts on them; the stub stops before the RNG
+     * register at 0xB0 and the "QEMU" origin register); the Wi-Fi MAC status
+     * bit lets hal_init through; ana (regi2c) and fe answer the PHY
+     * calibration. With -nic user,model=esp32_wifi the MAC is emulated with
+     * the fake AP "PICSimLabWifi" bridged to that NIC, over the stub.
+     */
+    {
+        static const struct {
+            hwaddr base;
+            uint32_t size;
+            uint32_t off[4], mask[4];
+            int n;
+        } stubs[] = {
+            { DR_REG_SYSCON_BASE, 0x20, { 0 }, { 0 }, 0 },
+            { 0x60033000, 0x1000, { 0xD14 }, { 1u << 0 }, 1 },
+        };
+        for (int i = 0; i < ARRAY_SIZE(stubs); i++) {
+            DeviceState *d = qdev_new("misc.esp32s3.regstub");
+            QList *offs = qlist_new(), *masks = qlist_new();
+            for (int j = 0; j < stubs[i].n; j++) {
+                qlist_append_int(offs, stubs[i].off[j]);
+                qlist_append_int(masks, stubs[i].mask[j]);
+            }
+            qdev_prop_set_uint32(d, "size", stubs[i].size);
+            qdev_prop_set_array(d, "or-offsets", offs);
+            qdev_prop_set_array(d, "or-masks", masks);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+            memory_region_add_subregion_overlap(sys_mem, stubs[i].base,
+                                                sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+        }
+
+        DeviceState *d = qdev_new(TYPE_ESP32S3_ANA);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_RTC_I2C_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+        d = qdev_new(TYPE_ESP32_FE);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_FE_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+
+        NICInfo *nd = qemu_find_nic_info(TYPE_ESP32_WIFI, false, NULL);
+        if (nd) {
+            d = qdev_new(TYPE_ESP32_WIFI);
+            /* Station MAC: with no efuse file, burn the NIC's MAC into the in-RAM efuse. */
+            ESPEfuseState *ef = &ms->efuse.parent;
+            if (ef->mirror) {
+                uint8_t *mm = (uint8_t *)&((ESPEfuseBlocks *)ef->mirror)->rd_mac_spi_sys_0;
+                for (int i = 0; i < 6; i++) {
+                    mm[5 - i] = nd->macaddr.a[i];
+                }
+            }
+            device_cold_reset(DEVICE(&ms->efuse));
+            const uint8_t *m = (const uint8_t *)&ef->efuses.blocks.rd_mac_spi_sys_0;
+            for (int i = 0; i < 6; i++) {
+                ESP32_WIFI(d)->macaddr[i] = m[5 - i];
+            }
+            qdev_set_nic_properties(d, nd);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+            memory_region_add_subregion_overlap(sys_mem, 0x60033000,
+                                                sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 2);
+            sysbus_connect_irq(SYS_BUS_DEVICE(d), 0,
+                               qdev_get_gpio_in(intmatrix_dev, ETS_WIFI_MAC_INTR_SOURCE));
+        }
+    }
+
+    if (object_dynamic_cast(OBJECT(machine), TYPE_X3_MACHINE)) {
+        x3_board_init(ms);
+    }
+}
+
+static DeviceState *x3_add_i2c(I2CBus *bus, const char *type, uint8_t addr)
+{
+    DeviceState *dev = qdev_new(type);
+    qdev_prop_set_uint8(dev, "address", addr);
+    qdev_realize_and_unref(dev, BUS(bus), &error_fatal);
+    return dev;
+}
+
+/*
+ * Xteink X3 (freeink-sdk BoardConfig XTEINK_X3): UC8279d/UC8253 panel on
+ * GPSPI2 (SCLK 8, SDA 10, CS 21, DC 4, RST 5, BUSY 6), SD card in SPI mode
+ * on the same bus (MISO 7, CS 12), keys on an ADC ladder (GPIO1, GPIO2) and
+ * Power on GPIO3, BQ27220 / DS3231 / QMI8658 on I2C0 (SDA 20, SCL 0).
+ */
+static void x3_board_init(Esp32C3MachineState *ms)
+{
+    DeviceState *gpio = DEVICE(&ms->gpio);
+    DeviceState *rtc = DEVICE(&ms->rtccntl);
+    SSIBus *bus = (SSIBus *)qdev_get_child_bus(ms->spi2, "spi");
+    DeviceState *panel = qdev_new("uc8279");
+    qdev_set_id(panel, g_strdup("panel"), &error_fatal);
+    ssi_realize_and_unref(panel, bus, &error_fatal);
+
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 21, qdev_get_gpio_in_named(panel, SSI_GPIO_CS, 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 4, qdev_get_gpio_in_named(panel, "dc", 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 5, qdev_get_gpio_in_named(panel, "rst", 0));
+    qdev_connect_gpio_out_named(panel, "busy", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 6));
+    qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 6), 1);
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 8, qdev_get_gpio_in_named(panel, "sclk", 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 10, qdev_get_gpio_in_named(panel, "sda", 0));
+    qdev_connect_gpio_out_named(panel, "sda-out", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 10));
+    qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 10), 1);
+
+    DeviceState *sd = qdev_new("ssi-sd");
+    qdev_prop_set_uint8(sd, "cs", 1);       /* the SSI bus wants distinct CS indexes */
+    ssi_realize_and_unref(sd, bus, &error_fatal);
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 12, qdev_get_gpio_in_named(sd, SSI_GPIO_CS, 0));
+    DriveInfo *dinfo = drive_get(IF_SD, 0, 0);
+    DeviceState *card = qdev_new(TYPE_SD_CARD_SPI);
+    qdev_prop_set_drive_err(card, "drive", dinfo ? blk_by_legacy_dinfo(dinfo) : NULL, &error_fatal);
+    qdev_realize_and_unref(card, qdev_get_child_bus(sd, "sd-bus"), &error_fatal);
+
+    DeviceState *keys = qdev_new("x3-keys");
+    object_property_add_child(qdev_get_machine(), "x3-keys", OBJECT(keys));
+    qdev_connect_gpio_out_named(keys, "adc", 0, qdev_get_gpio_in_named(ms->saradc, "adc1", 1));
+    qdev_connect_gpio_out_named(keys, "adc", 1, qdev_get_gpio_in_named(ms->saradc, "adc1", 2));
+    qdev_connect_gpio_out_named(keys, "power", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 3));
+    qdev_connect_gpio_out_named(keys, "power", 1, qdev_get_gpio_in_named(rtc, ESP32C3_RTC_PAD, 3));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(keys), &error_fatal);
+
+    I2CBus *i2c = I2C_BUS(qdev_get_child_bus(ms->i2c0, "i2c"));
+    x3_add_i2c(i2c, "bq27220", 0x55);
+    x3_add_i2c(i2c, "ds3231", 0x68);
+    x3_add_i2c(i2c, "qmi8658", 0x6b);
 }
 
 
@@ -672,6 +852,18 @@ static void esp32c3_machine_class_init(ObjectClass *oc, void *data)
     mc->default_ram_size = 400 * 1024;
 }
 
+static void x3_machine_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    mc->desc = "Xteink X3 (ESP32-C3, UC8279d e-paper)";
+}
+
+static const TypeInfo x3_info = {
+    .name = TYPE_X3_MACHINE,
+    .parent = TYPE_ESP32C3_MACHINE,
+    .class_init = x3_machine_class_init,
+};
+
 /* Create a new type of machine ("child class") */
 static const TypeInfo esp32c3_info = {
     .name = TYPE_ESP32C3_MACHINE,
@@ -686,6 +878,7 @@ static const TypeInfo esp32c3_info = {
 static void esp32c3_machine_type_init(void)
 {
     type_register_static(&esp32c3_info);
+    type_register_static(&x3_info);
 }
 
 type_init(esp32c3_machine_type_init);

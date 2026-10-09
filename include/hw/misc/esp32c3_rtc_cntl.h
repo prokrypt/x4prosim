@@ -3,6 +3,7 @@
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "hw/registerfields.h"
+#include "qemu/timer.h"
 
 #define TYPE_ESP32C3_RTC_CNTL "misc.esp32c3.rtc_cntl"
 #define ESP32C3_RTC_CNTL(obj) OBJECT_CHECK(ESP32C3RtcCntlState, (obj), TYPE_ESP32C3_RTC_CNTL)
@@ -12,6 +13,11 @@
 #define SET_BIT(reg, bit)   do { (reg) |= BIT(bit); } while(0)
 
 #define ESP32C3_RTC_CPU_RESET_GPIO    "cpu-reset"
+/* Named GPIO in from the GPIO model: a pin with light-sleep wakeup enabled is at its level. */
+#define ESP32C3_RTC_GPIO_WAKE         "gpio-wake"
+/* Named GPIO in: levels of GPIO0-5, the deep-sleep wake pads. */
+#define ESP32C3_RTC_PAD               "pad"
+#define ESP32C3_RTC_PAD_COUNT         6
 
 /**
  * Size of the I/O space for the RTC CTNL.
@@ -54,7 +60,24 @@ typedef struct ESP32C3RtcCntlState {
     ESP32C3ResetReason reason;
     /* IRQ used to notify the machine that we need a reset */
     qemu_irq cpu_reset;
+    qemu_irq irq;
 
+    /* x4prosim: RTC timer and sleep */
+    uint32_t slp_timer[2];
+    uint32_t state0;
+    uint32_t wakeup_state;
+    uint32_t int_ena;
+    uint32_t int_raw;
+    uint32_t wakeup_cause;
+    uint32_t gpio_wakeup;
+    uint32_t dig_pwc;
+    uint64_t time_latch;
+    int64_t time_base_ns;
+    int64_t sleep_start_ns;
+    bool sleeping;
+    bool gpio_wake;
+    uint8_t pad_level;
+    QEMUTimer sleep_timer;
 } ESP32C3RtcCntlState;
 
 
