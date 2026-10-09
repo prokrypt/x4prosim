@@ -85,6 +85,7 @@ struct DisasContextBase {
     DisasJumpType is_jmp;
     int num_insns;
     int max_insns;
+    unsigned icount_cost;
     bool plugin_enabled;
     bool fake_insn;
     struct TCGOp *insn_start;
@@ -132,6 +133,8 @@ typedef struct TranslatorOps {
     void (*tb_start)(DisasContextBase *db, CPUState *cpu);
     void (*insn_start)(DisasContextBase *db, CPUState *cpu);
     void (*translate_insn)(DisasContextBase *db, CPUState *cpu);
+    /* Optional tick cost of the instruction just translated; default 1. */
+    unsigned (*insn_cost)(DisasContextBase *db, CPUState *cpu);
     void (*tb_stop)(DisasContextBase *db, CPUState *cpu);
     bool (*disas_log)(const DisasContextBase *db, CPUState *cpu, FILE *f);
 } TranslatorOps;

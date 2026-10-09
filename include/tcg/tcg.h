@@ -545,6 +545,7 @@ struct TCGContext {
     TCGTemp *reg_to_temp[TCG_TARGET_NB_REGS];
 
     uint16_t gen_insn_end_off[TCG_MAX_INSNS];
+    uint16_t gen_insn_cost[TCG_MAX_INSNS];
     uint64_t *gen_insn_data;
 
     /* Exit to translator on overflow. */

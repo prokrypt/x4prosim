@@ -504,6 +504,9 @@ struct ArchCPU {
 
     /* Configuration Settings */
     RISCVCPUConfig cfg;
+    uint8_t cost_base, cost_load, cost_store, cost_mul;
+    uint8_t cost_div, cost_branch, cost_flash_fetch;
+    uint32_t cost_clock_scale; /* Zero means the untuned 1x rate. */
 
     QEMUTimer *pmu_timer;
     /* A bitmask of Available programmable counters */
