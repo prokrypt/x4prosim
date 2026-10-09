@@ -814,6 +814,22 @@ static void x3_board_init(Esp32C3MachineState *ms)
     DeviceState *rtc = DEVICE(&ms->rtccntl);
     SSIBus *bus = (SSIBus *)qdev_get_child_bus(ms->spi2, "spi");
     DeviceState *panel = qdev_new("uc8279");
+
+    if (!qdev_find_global_prop(OBJECT(panel), "uc8253")) {
+        qdev_prop_set_bit(panel, "uc8253", true);
+    }
+    if (object_property_get_bool(OBJECT(panel), "uc8253", &error_fatal)) {
+        /* Measured UC8253 X3; see x4prosim/sdcal/panel.md. */
+        if (!qdev_find_global_prop(OBJECT(panel), "frame-us")) {
+            qdev_prop_set_uint32(panel, "frame-us", 12850);
+        }
+        if (!qdev_find_global_prop(OBJECT(panel), "refresh-overhead-us")) {
+            qdev_prop_set_uint32(panel, "refresh-overhead-us", 138000);
+        }
+        if (!qdev_find_global_prop(OBJECT(panel), "pon-ms")) {
+            qdev_prop_set_uint32(panel, "pon-ms", 127);
+        }
+    }
     qdev_set_id(panel, g_strdup("panel"), &error_fatal);
     ssi_realize_and_unref(panel, bus, &error_fatal);
 

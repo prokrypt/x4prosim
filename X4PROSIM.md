@@ -205,7 +205,7 @@ the gauge and the SD card readable and writable. Hardware (freeink-sdk
 | Area | Hardware | Pins / bus | Model |
 | --- | --- | --- | --- |
 | SoC blocks | the S3 models fit the C3's register maps: GPIO (`esp32s3_gpio.c`), GPSPI2 (`esp32s3_gpspi.c`), I2C0 (`esp32s3_i2c.c`), USB-CDC console (`esp32s3_usb_jtag.c`) | | wired for every C3 machine |
-| Display | UC8279d 792x528 (newer units) or UC8253 (older), SPI 10 MHz, VER probed bit-banged | SCLK 8, SDA 10, CS 21, DC 4, RST 5, BUSY_N 6 | `hw/display/uc8279.c`; `-global uc8279.uc8253=true` for the old run (VER floats, UC8253 LUT format) |
+| Display | UC8279d 792x528 (newer units) or UC8253 (older), SPI 10 MHz, VER probed bit-banged | SCLK 8, SDA 10, CS 21, DC 4, RST 5, BUSY_N 6 | `hw/display/uc8279.c`; X3 defaults to UC8253 (VER floats); `-global uc8279.uc8253=false` selects UC8279d |
 | SD | SPI mode on the same bus, SdFat; GPIO13 = rail enable | MISO 7, CS 12 | QEMU `ssi-sd` + `sd-card-spi`, `-drive if=sd` |
 | Keys | ADC ladder: Back/Confirm/Left/Right on GPIO1 (ADC1 ch1), Up/Down on GPIO2 (ch2), raw 3512/2694/1493/5 and 2242/5, idle 4095; Power GPIO3 active-LOW | SAR ADC | `hw/misc/esp32c3_saradc.c` (one-shot), `hw/input/x3_keys.c`: arrows, Enter, Backspace/Esc, P; `qom-set /machine/x3-keys confirm true` |
 | Fuel gauge | BQ27220 at 0x55: Voltage, Current, SOC, DesignCapacity, CFGUPDATE flow | I2C0 SDA 20, SCL 0 | `hw/misc/bq27220.c`: `-global bq27220.soc=80,voltage-mv=3900,current-ma=-80` (Current > 0 = USB power: the firmware goes back to sleep at boot) |
@@ -272,11 +272,20 @@ Notes:
   `--trace 'enable=ssi_sd_*' --trace 'enable=esp32s3_gpspi_*'`.
   Setting all card latency properties to zero disables only card delays;
   transfers still consume their wire time and configured GPSPI setup time.
-- The panel model is simpler than the UC8179's: the register LUTs move the ink per
+- The panel model is simpler than the UC8179's: register LUTs move the ink per
   phase ((frames - `dead-frames`) / `swing-frames` of the way, so a one-frame
-  balance pulse does nothing), BUSY_N lasts the LUT's frames x `frame-us`
-  (GC 53 frames = 1060 ms, DU 20 = 400 ms, device ~1.1 s / ~0.4 s), no animation,
-  no ghosting. The partial window (0x90) and TRES are honored.
+  balance pulse does nothing), without animation or ghosting. The partial
+  window (0x90) and TRES are honored. BUSY uses the longest of VCOM and the four
+  transition rows, with a fixed refresh overhead. X3 UC8253 defaults are
+  `frame-us=12850`, `refresh-overhead-us=138000`, `pon-ms=127`, `pof-ms=2`:
+  fast 382 ms, grayscale pre-BW 485 ms, gray 228 ms, full 935 ms. Every setting
+  accepts a `-global uc8279.<property>=<value>` override; `busy-ms` fixes DRF
+  duration when nonzero. UC8279d retains generic 20000/0/2/2 defaults.
+  PLL (0x30) scales the frame period relative to the driver's init value
+  (0x09 UC8253, 0x0f UC8279d); its family-table mapping remains provisional.
+  Trace per-row totals with `-d trace:uc8279_refresh -D panel.trace`.
+  See [panel calibration](x4prosim/sdcal/panel.md) for the fit, measured waits,
+  LUT repeat semantics, and limitations.
 - A cold boot needs the power button held (the firmware re-sleeps otherwise):
   `x3-keys.power-boot-ms` (default 1500) holds it from reset.
 - CrossPoint up to 1.6.5 deadlocks on a first boot whose NVS has no cached device
