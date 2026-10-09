@@ -158,6 +158,13 @@ system_ss.add(when: 'CONFIG_RISCV_ESP32C3', if_true: files(
   'esp32c3_jtag.c',
   'esp32s3_usb_jtag.c',
   'esp32c3_saradc.c',
+  'esp32s3_regstub.c',
+  'esp32s3_ana.c',
+  'esp32_fe.c',
+  'esp32s3_wifi.c',
+  'esp32_phya.c',
+  'esp32_wifi_ap.c',
+  'esp32_wlan_packet.c',
   'esp32c3_rtc_cntl.c',
   'esp_hmac.c',
   'esp32c3_hmac.c'

@@ -3,7 +3,7 @@
 # usage: x4prosim/run.sh flash.bin [sd.img] [extra qemu args...]
 # The machine follows the image's chip (byte 12 of the bootloader header): ESP32-S3 -> x4pro,
 # ESP32-C3 -> x3. X4MACHINE=x3|x4pro overrides.
-# Wi-Fi (x4pro only): the fake AP "PICSimLabWifi" is bridged to a QEMU NIC.
+# Wi-Fi: the fake AP "PICSimLabWifi" is bridged to a QEMU NIC.
 #   X4BR=br0: on your LAN (router DHCP); needs "allow br0" in /usr/local/etc/qemu/bridge.conf, run as root.
 #   default: QEMU NAT (10.0.2.15), host :8080 -> device :80. X4NET overrides both.
 # Monitor: unix socket /tmp/x4prosim-mon.sock (HMP). GDB: add "-s -S".
@@ -16,14 +16,14 @@ cp "$img" "$img.run"
 chip=$(od -An -tu1 -j12 -N1 "$img" | tr -d ' ')
 : "${X4MACHINE:=$([ "$chip" = 5 ] && echo x3 || echo x4pro)}"
 if [ "$X4MACHINE" = x3 ]; then
-  qemu=$here/build/qemu-system-riscv32; net=""
+  qemu=$here/build/qemu-system-riscv32
   echo "x4prosim: X3 (ESP32-C3); keys: arrows, Enter, Backspace, P" >&2
 else
   qemu=$here/build/qemu-system-xtensa
-  [ -n "$X4BR" ] && : "${X4NET=-nic bridge,br=$X4BR,helper=$here/build/qemu-bridge-helper,model=esp32_wifi}"
-  [ -n "$X4BR" ] && echo "x4prosim: Wi-Fi bridged to $X4BR (LAN DHCP)" >&2 || echo "x4prosim: Wi-Fi on QEMU NAT (10.0.2.15); X4BR=br0 for your LAN" >&2
-  net=${X4NET--nic user,model=esp32_wifi,hostfwd=tcp::8080-:80}
 fi
+[ -n "$X4BR" ] && : "${X4NET=-nic bridge,br=$X4BR,helper=$here/build/qemu-bridge-helper,model=esp32_wifi}"
+[ -n "$X4BR" ] && echo "x4prosim: Wi-Fi bridged to $X4BR (LAN DHCP)" >&2 || echo "x4prosim: Wi-Fi on QEMU NAT (10.0.2.15); X4BR=br0 for your LAN" >&2
+net=${X4NET--nic user,model=esp32_wifi,hostfwd=tcp::8080-:80}
 # -icount: guest time follows instructions (~240 MHz), not host speed, so light-sleep timing can't overshoot.
 exec "$qemu" -machine "$X4MACHINE" -icount shift=2,sleep=on \
   -drive file="$img.run",if=mtd,format=raw \

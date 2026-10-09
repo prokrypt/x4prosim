@@ -38,6 +38,10 @@
 #include "hw/sd/sd.h"
 #include "hw/ssi/ssi.h"
 #include "monitor/qdev.h"
+#include "qapi/qmp/qlist.h"
+#include "hw/misc/esp32s3_ana.h"
+#include "hw/misc/esp32_fe.h"
+#include "hw/misc/esp32_wifi.h"
 #include "hw/nvram/esp32c3_efuse.h"
 #include "hw/riscv/esp32c3_clk.h"
 #include "hw/riscv/esp32c3_intmatrix.h"
@@ -704,6 +708,74 @@ static void esp32c3_machine_init(MachineState *machine)
     memory_region_add_subregion_overlap(sys_mem, DR_REG_TWAI_BASE, twai_mr, 0);
     sysbus_connect_irq(SYS_BUS_DEVICE(&ms->twai), 0,
                        qdev_get_gpio_in(DEVICE(&ms->intmatrix), ETS_TWAI_INTR_SOURCE));
+
+    /*
+     * x4prosim: radio, as on the S3 machine (the models came from an ESP32-C3
+     * port, so the register bases are the C3's). SYSCON's clock/reset enables
+     * read back (the PHY asserts on them; the stub stops before the RNG
+     * register at 0xB0 and the "QEMU" origin register); the Wi-Fi MAC status
+     * bit lets hal_init through; ana (regi2c) and fe answer the PHY
+     * calibration. With -nic user,model=esp32_wifi the MAC is emulated with
+     * the fake AP "PICSimLabWifi" bridged to that NIC, over the stub.
+     */
+    {
+        static const struct {
+            hwaddr base;
+            uint32_t size;
+            uint32_t off[4], mask[4];
+            int n;
+        } stubs[] = {
+            { DR_REG_SYSCON_BASE, 0x20, { 0 }, { 0 }, 0 },
+            { 0x60033000, 0x1000, { 0xD14 }, { 1u << 0 }, 1 },
+        };
+        for (int i = 0; i < ARRAY_SIZE(stubs); i++) {
+            DeviceState *d = qdev_new("misc.esp32s3.regstub");
+            QList *offs = qlist_new(), *masks = qlist_new();
+            for (int j = 0; j < stubs[i].n; j++) {
+                qlist_append_int(offs, stubs[i].off[j]);
+                qlist_append_int(masks, stubs[i].mask[j]);
+            }
+            qdev_prop_set_uint32(d, "size", stubs[i].size);
+            qdev_prop_set_array(d, "or-offsets", offs);
+            qdev_prop_set_array(d, "or-masks", masks);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+            memory_region_add_subregion_overlap(sys_mem, stubs[i].base,
+                                                sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+        }
+
+        DeviceState *d = qdev_new(TYPE_ESP32S3_ANA);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_RTC_I2C_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+        d = qdev_new(TYPE_ESP32_FE);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_FE_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 1);
+
+        NICInfo *nd = qemu_find_nic_info(TYPE_ESP32_WIFI, false, NULL);
+        if (nd) {
+            d = qdev_new(TYPE_ESP32_WIFI);
+            /* Station MAC: with no efuse file, burn the NIC's MAC into the in-RAM efuse. */
+            ESPEfuseState *ef = &ms->efuse.parent;
+            if (ef->mirror) {
+                uint8_t *mm = (uint8_t *)&((ESPEfuseBlocks *)ef->mirror)->rd_mac_spi_sys_0;
+                for (int i = 0; i < 6; i++) {
+                    mm[5 - i] = nd->macaddr.a[i];
+                }
+            }
+            device_cold_reset(DEVICE(&ms->efuse));
+            const uint8_t *m = (const uint8_t *)&ef->efuses.blocks.rd_mac_spi_sys_0;
+            for (int i = 0; i < 6; i++) {
+                ESP32_WIFI(d)->macaddr[i] = m[5 - i];
+            }
+            qdev_set_nic_properties(d, nd);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+            memory_region_add_subregion_overlap(sys_mem, 0x60033000,
+                                                sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 2);
+            sysbus_connect_irq(SYS_BUS_DEVICE(d), 0,
+                               qdev_get_gpio_in(intmatrix_dev, ETS_WIFI_MAC_INTR_SOURCE));
+        }
+    }
 
     if (object_dynamic_cast(OBJECT(machine), TYPE_X3_MACHINE)) {
         x3_board_init(ms);

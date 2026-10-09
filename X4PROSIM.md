@@ -212,6 +212,7 @@ the gauge and the SD card readable and writable. Hardware (freeink-sdk
 | RTC | DS3231 at 0x68 | I2C0 | `hw/rtc/ds3231.c`, host clock (UTC) |
 | IMU | QMI8658 at 0x6B (WHO_AM_I 0x05) | I2C0 | `hw/misc/qmi8658.c`, lying flat, at rest |
 | Sleep | no light sleep in CrossPoint; deep sleep with GPIO3 wake, RTC timer | RTC_CNTL | `esp32c3_rtc_cntl.c`: RTC timer, light sleep (timer/GPIO), deep sleep = reset with reason DEEPSLEEP and the wake cause |
+| Wi-Fi | MAC + fake open AP bridged to `-nic user` | n/a | the S3 models at the same bases (`esp32s3_wifi.c`, `esp32s3_ana.c`, `esp32_fe.c`) |
 
 Notes:
 - The panel model is simpler than the UC8179's: the register LUTs move the ink per
@@ -232,8 +233,11 @@ Notes:
 - `hw/sd/ssi-sd.c` fixes for SdFat: R3/R7 carry the real idle bit (CMD58 after
   ACMD41 is 0x00), a write's data token right after R1 is taken (no fill byte),
   CMD13 answers an SPI R2.
-- Not modeled: Wi-Fi on the C3 (the S3 MAC model could be ported), the frontlight
-  (the X3 has none), USB MSC, flash encryption.
+- Wi-Fi: the S3's radio models (regstub, ana, fe, Wi-Fi MAC with the fake AP) are
+  wired for every C3 machine too; `run.sh` adds the NIC like on the X4 Pro. SYSCON's
+  first 0x20 bytes are a register stub so the PHY's clock-enable assert passes
+  (Settings > Manage Fonts starts Wi-Fi and crashed on it).
+- Not modeled: the frontlight (the X3 has none), USB MSC, flash encryption.
 
 ## Hardware to model (X4 Pro pin map, from freeink-sdk BoardConfig.h `XTEINK_X4_PRO`)
 
