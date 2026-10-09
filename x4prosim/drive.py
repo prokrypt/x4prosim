@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""Boot an X4 Pro image headless and run a script of steps against it.
+"""Boot an X4 Pro or X3 image headless and run a script of steps against it.
 
 usage: drive.py flash.bin sd.img log.txt STEP...
-steps:  wait:SECONDS     press:up|down|power[:MS]     shot:FILE.png
+steps:  wait:SECONDS     press:KEY[:MS]     shot:FILE.png
         hmp:COMMAND      (any monitor command, output printed)
+KEY: up|down|power on the X4 Pro; back|confirm|left|right|up|down|power on the X3.
+The machine follows the image's chip (X4MACHINE=x3|x4pro overrides).
 The firmware log (USB-CDC) goes to log.txt."""
 import os, socket, subprocess, sys, time
 
 here = os.path.dirname(os.path.abspath(__file__))
-qemu = os.path.join(here, "..", "build", "qemu-system-xtensa")
 img, sd, log, steps = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+with open(img, "rb") as f:
+    chip = f.read(13)[12]    # bootloader image header: 5 = ESP32-C3, 9 = ESP32-S3
+machine = os.environ.get("X4MACHINE") or ("x3" if chip == 5 else "x4pro")
+qemu = os.path.join(here, "..", "build", "qemu-system-riscv32" if machine == "x3" else "qemu-system-xtensa")
+keys = "x3-keys" if machine == "x3" else "x4pro-keys"
 sock = f"/tmp/x4prosim-{os.getpid()}.sock"
 if not os.path.exists(sd):
     subprocess.run([sys.executable, os.path.join(here, "mksd.py"), sd], check=True)
 subprocess.run(["cp", img, img + ".run"], check=True)
 # icount: guest time follows instructions (~240 MHz), not host speed, so light-sleep timing can't overshoot.
-p = subprocess.Popen([qemu, "-machine", "x4pro", "-icount", "shift=2,sleep=on", "-display", "none", "-serial", "null",
+p = subprocess.Popen([qemu, "-machine", machine, "-icount", "shift=2,sleep=on", "-display", "none", "-serial", "null",
                       "-drive", f"file={img}.run,if=mtd,format=raw", "-drive", f"file={sd},if=sd,format=raw",
                       "-chardev", f"file,id=cdc,path={log}",
                       "-global", "driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc",
@@ -52,9 +58,9 @@ try:
             time.sleep(float(arg))
         elif kind == "press":
             key, _, ms = arg.partition(":")
-            hmp(f"qom-set /machine/x4pro-keys {key} true")
+            hmp(f"qom-set /machine/{keys} {key} true")
             time.sleep(int(ms or 150) / 1000)
-            hmp(f"qom-set /machine/x4pro-keys {key} false")
+            hmp(f"qom-set /machine/{keys} {key} false")
         elif kind == "shot":
             print(hmp(f"screendump {os.path.abspath(arg)} -f png panel") or f"shot {arg}")
         elif kind == "hmp":

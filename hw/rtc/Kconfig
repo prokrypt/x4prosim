@@ -12,6 +12,10 @@ config BM8563
     bool
     depends on I2C
 
+config DS3231
+    bool
+    depends on I2C
+
 config M48T59
     bool
 

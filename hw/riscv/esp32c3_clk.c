@@ -19,6 +19,31 @@
 #include "hw/qdev-properties.h"
 #include "hw/riscv/esp32c3_clk.h"
 #include "hw/riscv/esp32c3_clk_defs.h"
+#include "exec/cpu-common.h"
+#include <zlib.h>
+
+#define ESP32C3_RTC_FASTMEM_BASE 0x50000000
+#define ESP32C3_RTC_FASTMEM_SIZE 0x2000
+
+/*
+ * x4prosim: the RTC_MEM_CRC engine: START sums RTC fast memory from word
+ * ADDR, LEN + 1 words, into RTC_FASTMEM_CRC and raises FINISH at once. The
+ * deep-sleep entry and the ROM's wake-stub check both use it, so only its
+ * consistency matters, not the silicon's polynomial.
+ */
+static void esp32c3_rtc_mem_crc(ESP32C3ClockState *s, uint32_t value)
+{
+    uint32_t addr = FIELD_EX32(value, SYSTEM_RTC_FASTMEM_CONFIG, RTC_MEM_CRC_ADDR) * 4;
+    uint32_t len = (FIELD_EX32(value, SYSTEM_RTC_FASTMEM_CONFIG, RTC_MEM_CRC_LEN) + 1) * 4;
+    uint8_t buf[ESP32C3_RTC_FASTMEM_SIZE];
+
+    if (addr >= ESP32C3_RTC_FASTMEM_SIZE) {
+        return;
+    }
+    len = MIN(len, ESP32C3_RTC_FASTMEM_SIZE - addr);
+    cpu_physical_memory_read(ESP32C3_RTC_FASTMEM_BASE + addr, buf, len);
+    s->rtc_fastmem_crc = crc32(0, buf, len);
+}
 
 
 #define CLOCK_DEBUG      0
@@ -68,6 +93,12 @@ static uint64_t esp32c3_clock_read(void *opaque, hwaddr addr, unsigned int size)
         case A_SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL:
             r = s->sys_ext_dev_enc_dec_ctrl;
             break;
+        case A_SYSTEM_RTC_FASTMEM_CONFIG:
+            r = s->rtc_fastmem_config;
+            break;
+        case A_SYSTEM_RTC_FASTMEM_CRC:
+            r = s->rtc_fastmem_crc;
+            break;
         default:
 #if CLOCK_WARNING
             warn_report("[CLOCK] Unsupported read from %08lx\n", addr);
@@ -91,6 +122,13 @@ static void esp32c3_clock_write(void *opaque, hwaddr addr, uint64_t value,
             break;
         case A_SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL:
             s->sys_ext_dev_enc_dec_ctrl = value;
+            break;
+        case A_SYSTEM_RTC_FASTMEM_CONFIG:
+            s->rtc_fastmem_config = value & ~R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_FINISH_MASK;
+            if (value & R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_START_MASK) {
+                esp32c3_rtc_mem_crc(s, value);
+                s->rtc_fastmem_config |= R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_FINISH_MASK;
+            }
             break;
         default:
 #if CLOCK_WARNING
