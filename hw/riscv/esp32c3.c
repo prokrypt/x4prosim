@@ -520,6 +520,18 @@ static void esp32c3_machine_init(MachineState *machine)
     /* x4prosim: GPSPI2, I2C0 and the SAR ADC (the S3 models fit the C3's register maps) */
     {
         ms->spi2 = qdev_new("ssi.esp32s3.gpspi");
+        if (object_dynamic_cast(OBJECT(machine), TYPE_X3_MACHINE)) {
+            Object *spi = OBJECT(ms->spi2);
+
+            /* Fit command and buffered-data phases separately at icount=2. */
+            if (!qdev_find_global_prop(spi, "transaction-overhead-us") &&
+                !qdev_find_global_prop(spi, "transaction-overhead-ns")) {
+                qdev_prop_set_uint32(ms->spi2, "transaction-overhead-ns", 1450);
+            }
+            if (!qdev_find_global_prop(spi, "buffer-overhead-ns")) {
+                qdev_prop_set_uint32(ms->spi2, "buffer-overhead-ns", 1875);
+            }
+        }
         object_property_add_child(OBJECT(machine), "spi2", OBJECT(ms->spi2));
         sysbus_realize_and_unref(SYS_BUS_DEVICE(ms->spi2), &error_fatal);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI2_BASE,
@@ -816,6 +828,30 @@ static void x3_board_init(Esp32C3MachineState *ms)
     qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 10), 1);
 
     DeviceState *sd = qdev_new("ssi-sd");
+    /* X3 card probe medians: see timing-evidence/calibration.md. */
+    const struct {
+        const char *name;
+        uint32_t us;
+    } sd_timings[] = {
+        { "read-access-us", 207 },
+        { "read-seq-access-us", 136 },
+        { "read-repeat-us", 108 },
+        { "read-next-us", 12 },
+        { "write-busy-us", 554 },
+        { "write-random-busy-us", 621 },
+        { "write-repeat-busy-us", 479 },
+        { "write-block-busy-us", 10 },
+        { "write-stop-busy-us", 480 },
+        { "write-stop-decrement-us", 26 },
+        { "write-stop-random-extra-us", 205 },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(sd_timings); i++) {
+        /* qdev_new already applied -global: preserve explicit overrides. */
+        if (!qdev_find_global_prop(OBJECT(sd), sd_timings[i].name)) {
+            qdev_prop_set_uint32(sd, sd_timings[i].name, sd_timings[i].us);
+        }
+    }
     qdev_prop_set_uint8(sd, "cs", 1);       /* the SSI bus wants distinct CS indexes */
     ssi_realize_and_unref(sd, bus, &error_fatal);
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 12, qdev_get_gpio_in_named(sd, SSI_GPIO_CS, 0));
