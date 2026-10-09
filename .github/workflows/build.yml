@@ -2,6 +2,11 @@ name: 'build'
 
 on: [push, pull_request]
 
+# x4prosim: a newer push to the same branch or PR cancels the older run
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
 
   Vars:
@@ -43,7 +48,7 @@ jobs:
     env:
       # A simple way to spread several environments for Windows. But to be more precise, we need to somehow add different envs to matrix.include
 
-      MSYSTEM: MINGW64  # Ref: https://www.msys2.org/docs/environments/
+      MSYSTEM: UCRT64  # Ref: https://www.msys2.org/docs/environments/
       CHERE_INVOKING: 'yes'
       MSYS: 'winsymlinks:native'
     strategy:
@@ -61,16 +66,16 @@ jobs:
         include:
           - platform: x86_64-linux-gnu
             runs_on: ubuntu-22.04
-            # Debian 11 provides the lowest possible Glibc version (2.31), given QEMU's glib2 => 2.66 requirement.
-            container: debian:11.11
+            # x4prosim: Debian 11's security archive is gone; Debian 12 (glibc 2.36)
+            container: debian:12
             shell: bash -e {0}
             run_prerequisites: "./.github/workflows/scripts/prerequisites-native.sh"
             run_configure: "./.github/workflows/scripts/configure-native.sh"
 
           - platform: aarch64-linux-gnu
             runs_on: ubuntu-22.04
-            # Debian 11 provides the lowest possible Glibc version (2.31), given QEMU's glib2 => 2.66 requirement.
-            container: debian:11.11
+            # x4prosim: Debian 11's security archive is gone; Debian 12 (glibc 2.36)
+            container: debian:12
             shell: bash -e {0}
             run_prerequisites: "./.github/workflows/scripts/prerequisites-cross-linux-arm64.sh"
             run_configure: "./.github/workflows/scripts/configure-cross-linux-arm64.sh"
@@ -81,13 +86,13 @@ jobs:
             run_configure: "./.github/workflows/scripts/configure-win.sh"
 
           - platform: x86_64-apple-darwin
-            runs_on: macos-14
+            runs_on: macos-15-intel
             shell: bash -e {0}
             run_prerequisites: "./.github/workflows/scripts/prerequisites-macos.sh"
             run_configure: "./.github/workflows/scripts/configure-macos.sh"
 
           - platform: aarch64-apple-darwin
-            runs_on: macos-14-xlarge
+            runs_on: macos-14
             shell: bash -e {0}
             run_prerequisites: "./.github/workflows/scripts/prerequisites-macos.sh"
             run_configure: "./.github/workflows/scripts/configure-macos.sh"
@@ -112,20 +117,20 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           cache: true
-          msystem: MINGW64
+          msystem: UCRT64
           install: >-
             diffutils
             git
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-glib2
-            mingw-w64-x86_64-libgcrypt
-            mingw-w64-x86_64-libiconv
-            mingw-w64-x86_64-libslirp
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-pixman
-            mingw-w64-x86_64-pkg-config
-            mingw-w64-x86_64-python
-            mingw-w64-x86_64-SDL2
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-libgcrypt
+            mingw-w64-ucrt-x86_64-libiconv
+            mingw-w64-ucrt-x86_64-libslirp
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-SDL2
 
       - name: Configure (${{ matrix.target }} @ ${{ matrix.platform }})
         env:
@@ -137,6 +142,18 @@ jobs:
       - name: Build (${{ matrix.target }} @ ${{ matrix.platform }})
         run: |
           ninja -C build install
+
+      - name: Smoke test (${{ matrix.target }} @ ${{ matrix.platform }})
+        if : ${{ matrix.platform == 'x86_64-linux-gnu' }}
+        run: |
+          # x4prosim: the board machines must come up (no firmware: blank flash spins in the ROM)
+          head -c 16777216 /dev/zero > blank.bin
+          if [ "${{ matrix.target }}" = xtensa-softmmu ]; then bin=qemu-system-xtensa; m=x4pro; else bin=qemu-system-riscv32; m=x3; fi
+          set +e
+          timeout 10 install/qemu/bin/$bin -machine $m -display none -serial null -monitor none \
+            -drive file=blank.bin,if=mtd,format=raw -nic user,model=esp32_wifi
+          rc=$?
+          [ $rc = 124 ] || { echo "machine $m exited with $rc"; exit 1; }
 
       - name: Bundle Windows DLLs (${{ matrix.target }} @ ${{ matrix.platform }})
         if : ${{ matrix.platform == 'x86_64-w64-mingw32' }}
@@ -151,6 +168,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           find $PWD/install/qemu/share/qemu/ -maxdepth 1 -mindepth 1 -not -name 'esp*.bin' -exec rm -rfv {} \;
+          cp -R x4prosim README.md X4PROSIM.md install/qemu/   # x4prosim: run.sh/drive.py find bin/ next to them
           export DIST_DIR=${PWD}/dist
           mkdir -p ${DIST_DIR}
           cd $PWD/install

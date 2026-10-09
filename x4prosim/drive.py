@@ -15,6 +15,8 @@ with open(img, "rb") as f:
     chip = f.read(13)[12]    # bootloader image header: 5 = ESP32-C3, 9 = ESP32-S3
 machine = os.environ.get("X4MACHINE") or ("x3" if chip == 5 else "x4pro")
 qemu = os.path.join(here, "..", "build", "qemu-system-riscv32" if machine == "x3" else "qemu-system-xtensa")
+if not os.path.exists(qemu):    # release archives have the binaries in bin/
+    qemu = os.path.join(here, "..", "bin", os.path.basename(qemu))
 keys = "x3-keys" if machine == "x3" else "x4pro-keys"
 sock = f"/tmp/x4prosim-{os.getpid()}.sock"
 if not os.path.exists(sd):

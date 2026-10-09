@@ -12,6 +12,17 @@ Built on Espressif's QEMU fork (`esp-develop`). The rule is that no firmware is
 ever changed to make it boot here: the hardware is modeled from datasheets and
 from the real board instead.
 
+## Downloads
+
+CI builds every push for Linux (x86_64, arm64), macOS (Intel, Apple silicon) and
+Windows, one archive per emulator (`xtensa-softmmu` = X4 Pro,
+`riscv32-softmmu` = X3). Get them from the latest run under
+[Actions](../../actions) (artifacts `dist-qemu-*`), or from
+[Releases](../../releases) for tagged versions. Each archive has `bin/`, the
+`x4prosim/` scripts and the docs; `x4prosim/run.sh` finds `bin/` by itself.
+Linux and macOS archives need the runtime libraries (glib, pixman, SDL2,
+libslirp, libgcrypt) installed; the Windows one bundles them.
+
 ## Quick start
 
 ```sh

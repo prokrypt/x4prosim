@@ -21,7 +21,9 @@ if [ "$X4MACHINE" = x3 ]; then
 else
   qemu=$here/build/qemu-system-xtensa
 fi
-[ -n "$X4BR" ] && : "${X4NET=-nic bridge,br=$X4BR,helper=$here/build/qemu-bridge-helper,model=esp32_wifi}"
+# release archives have the binaries in bin/ instead of build/
+[ -x "$qemu" ] || qemu=$here/bin/${qemu##*/}
+[ -n "$X4BR" ] && : "${X4NET=-nic bridge,br=$X4BR,helper=$(dirname "$qemu")/qemu-bridge-helper,model=esp32_wifi}"
 [ -n "$X4BR" ] && echo "x4prosim: Wi-Fi bridged to $X4BR (LAN DHCP)" >&2 || echo "x4prosim: Wi-Fi on QEMU NAT (10.0.2.15); X4BR=br0 for your LAN" >&2
 net=${X4NET--nic user,model=esp32_wifi,hostfwd=tcp::8080-:80}
 # -icount: guest time follows instructions (~240 MHz), not host speed, so light-sleep timing can't overshoot.

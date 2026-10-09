@@ -20,4 +20,4 @@ apt-get install -y -q --no-install-recommends \
 && :
 
 # Even though ./configure installs meson, just specify a version
-/usr/bin/pip3 install meson==1.7.0 tomli==2.2.1
+/usr/bin/pip3 install --break-system-packages meson==1.7.0 tomli==2.2.1
