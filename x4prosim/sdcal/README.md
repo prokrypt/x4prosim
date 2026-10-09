@@ -1,5 +1,11 @@
 # X3 SD/SPI calibration
 
+The current X3 defaults use nanosecond CPU costs and a re-fitted SPI setup and
+SD stop-busy model. See [CPU calibration and SD refit](cpu.md) for the current
+values, 30-row validation, and reading measurements; the values below document
+the original plain-instruction-count calibration at `icount shift=2`.
+
+
 All 30 median totals meet the requested limits: the largest absolute error is
 **2.92% for reads** (limit 5%) and **13.12% for writes** (limit 15%). The unchanged
 probe completed 60 groups / 2,880 operations with zero errors and reached Home.

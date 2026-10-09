@@ -197,3 +197,6 @@ dm163_bits_ppi(unsigned dest_width) "dest_width : %u"
 dm163_leds(int led, uint32_t value) "led %d: 0x%x"
 dm163_channels(int channel, uint8_t value) "channel %d: 0x%x"
 dm163_refresh_rate(uint32_t rr) "refresh rate %d"
+
+# UC8279/UC8253 complete RAM-plane transfer (command to final byte)
+uc8279_plane_write(uint8_t cmd, uint32_t bytes, int64_t ns) "cmd=0x%02x bytes=%u duration_ns=%" PRId64 ""

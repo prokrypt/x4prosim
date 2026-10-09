@@ -17,17 +17,19 @@ chip=$(od -An -tu1 -j12 -N1 "$img" | tr -d ' ')
 : "${X4MACHINE:=$([ "$chip" = 5 ] && echo x3 || echo x4pro)}"
 if [ "$X4MACHINE" = x3 ]; then
   qemu=$here/build/qemu-system-riscv32
+  icount_shift=0
   echo "x4prosim: X3 (ESP32-C3); keys: arrows, Enter, Backspace, P" >&2
 else
   qemu=$here/build/qemu-system-xtensa
+  icount_shift=2
 fi
 # release archives have the binaries in bin/ instead of build/
 [ -x "$qemu" ] || qemu=$here/bin/${qemu##*/}
 [ -n "$X4BR" ] && : "${X4NET=-nic bridge,br=$X4BR,helper=$(dirname "$qemu")/qemu-bridge-helper,model=esp32_wifi}"
 [ -n "$X4BR" ] && echo "x4prosim: Wi-Fi bridged to $X4BR (LAN DHCP)" >&2 || echo "x4prosim: Wi-Fi on QEMU NAT (10.0.2.15); X4BR=br0 for your LAN" >&2
 net=${X4NET--nic user,model=esp32_wifi,hostfwd=tcp::8080-:80}
-# -icount: guest time follows instructions (~240 MHz), not host speed, so light-sleep timing can't overshoot.
-exec "$qemu" -machine "$X4MACHINE" -icount shift=2,sleep=on \
+# X3 costs are nanoseconds: one icount tick is 1 ns; Xtensa keeps 4 ns ticks.
+exec "$qemu" -machine "$X4MACHINE" -icount shift=$icount_shift,sleep=on \
   -drive file="$img.run",if=mtd,format=raw \
   -drive file="$sd",if=sd,format=raw \
   -chardev stdio,id=cdc,mux=off -serial null \

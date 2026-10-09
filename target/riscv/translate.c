@@ -1262,8 +1262,9 @@ static unsigned riscv_max_insn_cost(RISCVCPU *cpu)
     unsigned extra = MAX(MAX(cpu->cost_load, cpu->cost_store),
                          MAX(MAX(cpu->cost_mul, cpu->cost_div),
                              cpu->cost_branch));
-    return MIN(UINT16_MAX, (MAX(1, cpu->cost_base) + extra +
-                           cpu->cost_flash_fetch) *
+    unsigned base = MAX(cpu->cost_rom_ns,
+                        MAX(cpu->cost_sram_ns, cpu->cost_flash_ns));
+    return MIN(UINT16_MAX, (MAX(1, base) + extra) *
                           MAX(1, cpu->cost_clock_scale));
 }
 
@@ -1307,9 +1308,13 @@ static unsigned riscv_tr_insn_cost(DisasContextBase *db, CPUState *cs)
         }
     }
     vaddr pc = db->pc_next - ctx->cur_insn_len;
-    unsigned fetch = pc >= 0x42000000 && pc < 0x42800000 ?
-                     cpu->cost_flash_fetch : 0;
-    return MIN(UINT16_MAX, (MAX(1, cpu->cost_base) + extra + fetch) *
+    unsigned base = cpu->cost_sram_ns;
+    if (pc >= 0x42000000 && pc < 0x42800000) {
+        base = cpu->cost_flash_ns;
+    } else if (pc >= 0x40000000 && pc < 0x40060000) {
+        base = cpu->cost_rom_ns;
+    }
+    return MIN(UINT16_MAX, (MAX(1, base) + extra) *
                           MAX(1, cpu->cost_clock_scale));
 }
 
