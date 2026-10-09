@@ -181,6 +181,9 @@ macfb_sense_read(uint32_t value) "video sense: 0x%"PRIx32
 macfb_sense_write(uint32_t value) "video sense: 0x%"PRIx32
 macfb_update_mode(uint32_t width, uint32_t height, uint8_t depth) "setting mode to width %"PRId32 " height %"PRId32 " size %d"
 
+# uc8279.c
+uc8279_refresh(int vcom_frames, int ww_frames, int bw_frames, int wb_frames, int bb_frames, uint8_t pll, uint64_t busy_ms) "frames vcom=%d ww=%d bw=%d wb=%d bb=%d pll=0x%02x busy_ms=%" PRIu64
+
 # dm163.c
 dm163_redraw(uint8_t redraw) "0x%02x"
 dm163_dck(unsigned new_state) "dck : %u"
