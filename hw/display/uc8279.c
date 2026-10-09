@@ -17,10 +17,21 @@
  * toward white by (frames - "dead-frames") / "swing-frames" of the way, so a
  * one-frame balance pulse does nothing and a 26-frame phase saturates; REG=0
  * (no waveform in this module's MTP) just shows NEW. BUSY_N is low for the
- * LUT's frame count times "frame-us". LUT groups are 7 bytes on the UC8279d
- * (4 phases of rail<<6|frames, byte 6 = repeat) and 6 bytes on the UC8253
- * (levels byte, 4 frame counts, repeat), the UC8179 format. Plane bit 1 =
- * white. PON/POF are busy for 2 ms; DSLP (0x07 A5) sleeps until RST.
+ * longest of VCOM and the four transition rows, plus refresh-overhead-us.
+ * The measured X3 banks have equal row lengths: they do NOT establish which
+ * row gates BUSY on silicon. Taking the maximum also handles a longer VCOM.
+ * UC8253 groups have 6 bytes (levels, four frame counts, repeat count).
+ * UC8279d groups have 7 (group repeat, four rail<<6|frames bytes, two state
+ * repeats); each state repeats its pair of phases within the group repeat.
+ * Zero repeats skip that group/state, not the rest of the table.
+ *
+ * PLL (0x30) scales frame-us relative to 0x09 (UC8253) / 0x0f (UC8279d).
+ * Rate tables: six-byte LUT family UC8179c C0.6 p24 (UC8253), seven-byte
+ * family UC8253c A0.61 p26 (UC8279d). These revision mappings are inferred,
+ * not a measured PLL sweep or matching-silicon documentation. frame-us is an
+ * effective panel period, not the reciprocal of the nominal PLL frequency.
+ * PON/POF use pon-ms/pof-ms. See x4prosim/sdcal/panel.md for calibration and
+ * remaining revision uncertainties. Plane bit 1 = white; DSLP sleeps until RST.
  * Shown portrait (528x792) like the device, panel row 0 at the right.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -36,6 +47,7 @@
 #include "hw/qdev-properties.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
+#include "trace.h"
 
 #define TYPE_UC8279 "uc8279"
 OBJECT_DECLARE_SIMPLE_TYPE(Uc8279State, UC8279)
@@ -62,6 +74,9 @@ struct Uc8279State {
     bool portrait;
     uint32_t busy_ms;       /* fixed DRF BUSY time; 0 = the LUT's frames */
     uint32_t frame_us;
+    uint32_t refresh_overhead_us;
+    uint32_t pon_ms;
+    uint32_t pof_ms;
     uint8_t swing;          /* frames of drive for a full black <-> white swing */
     uint8_t dead;           /* frames of a phase that don't move the ink */
 
@@ -72,6 +87,7 @@ struct Uc8279State {
     uint8_t cmd;
     uint32_t pos;           /* byte index into the data of the current command */
     uint8_t psr;
+    uint8_t pll;
     uint16_t tres_w, tres_h;
     bool partial;
     uint16_t win[4];        /* xs, xe, ys, ye */
@@ -94,11 +110,11 @@ struct Uc8279State {
 
 static const uint8_t uc8279_ver[] = { 0x00, 0x03, 0x66, 0x00, 0x00 };
 
-static void uc8279_set_busy(Uc8279State *s, uint32_t ms)
+static void uc8279_set_busy(Uc8279State *s, uint64_t us)
 {
     s->busy = true;
     qemu_set_irq(s->busy_n, 0);
-    timer_mod(&s->busy_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + ms);
+    timer_mod(&s->busy_timer, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) + us);
 }
 
 static void uc8279_busy_done(void *opaque)
@@ -109,8 +125,8 @@ static void uc8279_busy_done(void *opaque)
 }
 
 /*
- * Walks LUT row r: calls cb(rail, frames) per phase, repeats included.
- * Returns the total frame count. rail: 0 GND, 1 VDH, 2 VDL, 3 floating.
+ * Returns the row's frame count and net ink movement, repeats included.
+ * rail: 0 GND, 1 VDH, 2 VDL, 3 VDHR (not modeled by the ink approximation).
  */
 static int uc8279_lut_walk(Uc8279State *s, int r, float *move)
 {
@@ -121,43 +137,38 @@ static int uc8279_lut_walk(Uc8279State *s, int r, float *move)
     *move = 0;
     for (int g = 0; g + gsize <= n; g += gsize) {
         const uint8_t *grp = row + g;
-        int rep = s->uc8253 ? grp[5] : grp[6];
-        int frames = 0;
-        float m = 0;
         for (int ph = 0; ph < 4; ph++) {
-            int rail, f;
+            int rail, f, rep;
             if (s->uc8253) {
                 rail = (grp[0] >> (6 - 2 * ph)) & 3;
                 f = grp[1 + ph];
+                rep = grp[5];
             } else {
                 rail = grp[1 + ph] >> 6;
                 f = grp[1 + ph] & 0x3f;
+                rep = grp[0] * grp[5 + ph / 2];
             }
-            frames += f;
+            total += f * rep;
             if (f > s->dead && (rail == 1 || rail == 2)) {
-                m += (rail == 2 ? 1.0f : -1.0f) * (f - s->dead) / s->swing;
+                *move += (rail == 2 ? 1.0f : -1.0f) *
+                         (f - s->dead) / s->swing * rep;
             }
         }
-        if (frames == 0) {
-            break;
-        }
-        total += frames * rep;
-        *move += m * rep;
     }
     return total;
 }
 
 /* Runs the refresh over the glass; returns its frame count. */
-static int uc8279_refresh(Uc8279State *s)
+static int uc8279_refresh(Uc8279State *s, int row_frames[LUT_ROWS])
 {
     static const int row_of[4] = { 4, 2, 3, 1 };    /* class OLD<<1|NEW: KK, KW, WK, WW */
-    float move[4];
+    float move[LUT_ROWS] = { 0 };
     int frames = 0;
     bool lut = s->psr & PSR_REG;
 
-    for (int k = 0; k < 4 && lut; k++) {
-        int n = uc8279_lut_walk(s, row_of[k], &move[k]);
-        frames = MAX(frames, n);
+    for (int r = 0; r < LUT_ROWS; r++) {
+        row_frames[r] = lut ? uc8279_lut_walk(s, r, &move[r]) : 0;
+        frames = MAX(frames, row_frames[r]);
     }
     /* The driver streams framebuffer row H-1-i into RAM row i. */
     for (int y = 0; y < H; y++) {
@@ -167,7 +178,7 @@ static int uc8279_refresh(Uc8279State *s)
             int nw = (s->ram[PLANE_NEW][r][x / 8] >> (7 - x % 8)) & 1;
             float *p = &s->ink[y * W + x];
             if (lut) {
-                *p = MIN(1.0f, MAX(0.0f, *p + move[o << 1 | nw]));
+                *p = MIN(1.0f, MAX(0.0f, *p + move[row_of[o << 1 | nw]]));
             } else {
                 *p = nw;
             }
@@ -175,6 +186,33 @@ static int uc8279_refresh(Uc8279State *s)
     }
     s->redraw = true;
     return lut ? frames : 40;
+}
+
+static unsigned uc8279_pll_hz(bool uc8253, uint8_t pll)
+{
+    static const uint8_t six_byte_rates[] = {
+        5, 10, 15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 130, 150, 200
+    };
+    unsigned frs = pll & 0x1f;
+
+    if (uc8253) {
+        return six_byte_rates[pll & 0x0f];
+    }
+    return frs < 24 ? 5 * (frs + 1) : 130 + 10 * (frs - 24);
+}
+
+static uint64_t uc8279_refresh_us(Uc8279State *s, unsigned frames)
+{
+    unsigned ref_hz = uc8279_pll_hz(s->uc8253, s->uc8253 ? 0x09 : 0x0f);
+    uint64_t period = DIV_ROUND_UP((uint64_t)s->frame_us * ref_hz,
+                                  uc8279_pll_hz(s->uc8253, s->pll));
+    uint64_t us;
+
+    if (s->busy_ms) {
+        return (uint64_t)s->busy_ms * 1000;
+    }
+    us = (uint64_t)frames * MIN(period, UINT32_MAX) + s->refresh_overhead_us;
+    return MIN(MAX(us, 1), (uint64_t)UINT32_MAX * 1000);
 }
 
 static void uc8279_set_window(Uc8279State *s, int xs, int xe, int ys, int ye)
@@ -194,13 +232,20 @@ static void uc8279_command(Uc8279State *s, uint8_t c)
 
     switch (c) {
     case 0x02:  /* POF */
+        uc8279_set_busy(s, (uint64_t)s->pof_ms * 1000);
+        break;
     case 0x04:  /* PON */
-        uc8279_set_busy(s, 2);
+        uc8279_set_busy(s, (uint64_t)s->pon_ms * 1000);
         break;
     case 0x12: {    /* DRF */
-        int frames = uc8279_refresh(s);
-        uc8279_set_busy(s, s->busy_ms ? s->busy_ms
-                                      : MAX(1, (uint64_t)frames * s->frame_us / 1000));
+        int row_frames[LUT_ROWS];
+        int frames = uc8279_refresh(s, row_frames);
+        uint64_t us = uc8279_refresh_us(s, frames);
+
+        trace_uc8279_refresh(row_frames[0], row_frames[1], row_frames[2],
+                             row_frames[3], row_frames[4], s->pll,
+                             DIV_ROUND_UP(us, 1000));
+        uc8279_set_busy(s, us);
         break;
     }
     case 0x20 ... 0x24:
@@ -224,6 +269,11 @@ static void uc8279_command(Uc8279State *s, uint8_t c)
 static void uc8279_data(Uc8279State *s, uint8_t v)
 {
     switch (s->cmd) {
+    case 0x30:
+        if (s->pos++ == 0) {
+            s->pll = v & (s->uc8253 ? 0x0f : 0x1f);
+        }
+        break;
     case 0x00:
         if (s->pos++ == 0) {
             s->psr = v;
@@ -379,6 +429,7 @@ static int uc8279_set_cs(SSIPeripheral *dev, bool level)
 static void uc8279_reset_regs(Uc8279State *s)
 {
     s->psr = 0x0F;
+    s->pll = s->uc8253 ? 0x09 : 0x0f;
     s->partial = false;
     s->tres_w = RAM_W;
     s->tres_h = RAM_H;
@@ -452,7 +503,7 @@ static void uc8279_realize(SSIPeripheral *d, Error **errp)
     s->redraw = true;
     s->con = graphic_console_init(dev, 0, &uc8279_ops, s);
     qemu_console_resize(s->con, s->portrait ? H : W, s->portrait ? W : H);
-    timer_init_ms(&s->busy_timer, QEMU_CLOCK_VIRTUAL, uc8279_busy_done, s);
+    timer_init_us(&s->busy_timer, QEMU_CLOCK_VIRTUAL, uc8279_busy_done, s);
     qdev_init_gpio_in_named(dev, uc8279_set_dc, "dc", 1);
     qdev_init_gpio_in_named(dev, uc8279_set_rst, "rst", 1);
     qdev_init_gpio_in_named(dev, uc8279_set_sclk, "sclk", 1);
@@ -466,6 +517,10 @@ static Property uc8279_properties[] = {
     DEFINE_PROP_BOOL("portrait", Uc8279State, portrait, true),
     DEFINE_PROP_UINT32("busy-ms", Uc8279State, busy_ms, 0),
     DEFINE_PROP_UINT32("frame-us", Uc8279State, frame_us, 20000),
+    DEFINE_PROP_UINT32("refresh-overhead-us", Uc8279State,
+                       refresh_overhead_us, 0),
+    DEFINE_PROP_UINT32("pon-ms", Uc8279State, pon_ms, 2),
+    DEFINE_PROP_UINT32("pof-ms", Uc8279State, pof_ms, 2),
     DEFINE_PROP_UINT8("swing-frames", Uc8279State, swing, 6),
     DEFINE_PROP_UINT8("dead-frames", Uc8279State, dead, 1),
     DEFINE_PROP_END_OF_LIST(),
