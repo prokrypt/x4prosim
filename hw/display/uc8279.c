@@ -86,6 +86,7 @@ struct Uc8279State {
     bool busy;
     uint8_t cmd;
     uint32_t pos;           /* byte index into the data of the current command */
+    int64_t plane_start_ns;
     uint8_t psr;
     uint8_t pll;
     uint16_t tres_w, tres_h;
@@ -229,6 +230,9 @@ static void uc8279_command(Uc8279State *s, uint8_t c)
     s->pos = 0;
     s->rd = NULL;
     s->rd_len = 0;
+    if (c == 0x10 || c == 0x13) {
+        s->plane_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    }
 
     switch (c) {
     case 0x02:  /* POF */
@@ -324,6 +328,10 @@ static void uc8279_data(Uc8279State *s, uint8_t v)
         if (row <= ye) {
             s->ram[s->cmd == 0x10 ? PLANE_OLD : PLANE_NEW][row][xs / 8 + s->pos % wb] = v;
             s->pos++;
+            if (s->pos == wb * (ye - ys + 1)) {
+                trace_uc8279_plane_write(s->cmd, s->pos,
+                    qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->plane_start_ns);
+            }
         }
         break;
     }

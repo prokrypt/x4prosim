@@ -143,8 +143,8 @@ Done on `x4prosim`:
   (which never realizes it) no longer opens a stray black 800x600 SDL window.
 - `hw/misc/esp32s3_sens.c`: temperature sensor always ready, 25 C (Goodies >
   Battery & Stats hung a core on it). `run.sh` shows the host cursor in SDL.
-- `-icount shift=2` (set by `run.sh`/`drive.py`): guest time follows instructions,
-  not host speed; without it FreeRTOS can assert after light sleep on a slow host.
+- X4 Pro uses `-icount shift=2` (set by `run.sh`/`drive.py`): guest time follows
+  instructions, not host speed; without it FreeRTOS can assert after light sleep on a slow host.
   Guest runs slower than real time, so give `wait:` steps generous values.
 - `x4prosim/testdata/`: real device logs, the panel OTP dump, battery history to
   seed the SD card, estimated power numbers. See its README.
@@ -215,15 +215,24 @@ the gauge and the SD card readable and writable. Hardware (freeink-sdk
 | Wi-Fi | MAC + fake open AP bridged to `-nic user` | n/a | the S3 models at the same bases (`esp32s3_wifi.c`, `esp32s3_ana.c`, `esp32_fe.c`) |
 
 Notes:
+- X3 CPU timing uses `-icount shift=0,sleep=on` (selected by `run.sh` and
+  `drive.py`), so each tick is 1 ns. CPU properties on `espressif-riscv-cpu`
+  are `cost-rom-ns=6`, `cost-sram-ns=8`, `cost-flash-ns=10`, and additive
+  `cost-load=0`, `cost-store=3`, `cost-mul=0`, `cost-div=160`, `cost-branch=2`.
+  The clock registers select a factor relative to 160 MHz; 10 MHz costs 16x.
+  Override with `-global espressif-riscv-cpu.cost-flash-ns=9`, for example.
+  These are effective calibrated costs, not a cache or pipeline simulation.
+  See [CPU and SD refit](x4prosim/sdcal/cpu.md) for probe residuals, page
+  rendering measurements, clock validation, and the current 30-row SD table.
 - GPSPI2 completes CPU transfers on a virtual-clock timer. `SPI_CLOCK` selects
   an 80 MHz APB clock divided by `(clkdiv_pre + 1) * (clkcnt_n + 1)`, or 80 MHz
   directly with `clk_equ_sysclk`. The rate is sampled for each transaction, so
   the SD card's 40 MHz and the panel's 10 MHz both consume their wire time.
   `CMD.USR` stays set until the bytes reach the slave and `TRANS_DONE` is raised.
   All GPSPI setup properties are uint32 and default to zero on other boards.
-  The X3 adds 1450 ns per transaction (`transaction-overhead-ns`) and 1875 ns
+  The X3 adds 700 ns per transaction (`transaction-overhead-ns`) and 300 ns
   for transfers longer than one byte (`buffer-overhead-ns`). These effective
-  setup costs were fitted with the driver's instruction time included: commands
+  setup costs were re-fitted with the calibrated CPU driver time: commands
   take about 22 µs and read transfers about 147 µs per sector. The older
   `transaction-overhead-us` property remains additive. Setting either base
   overhead property explicitly suppresses the X3's default base overhead.
@@ -232,12 +241,12 @@ Notes:
   syntax to remove the buffered cost. The explicit form is needed because the
   device type contains dots. Both SD and panel transactions use these costs.
 - SD timing uses virtual-clock deadlines, including under
-  `-icount shift=2,sleep=on`. Polling reads return `0xff` until a data token is
+  `-icount shift=0,sleep=on`. Polling reads return `0xff` until a data token is
   ready; polling writes return busy (`0x00`) after the data response token.
-  The following `ssi-sd` uint32 properties are in microseconds. Their generic
-  defaults are zero; the X3 values are calibrated against three boots of the
+  The following `ssi-sd` properties are in microseconds (uint32 except the
+  signed `write-stop-decrement-us`). Their generic defaults are zero; the X3 values are calibrated against three boots of the
   supplied card at 40 MHz, using the unchanged SdFat SHARED-mode probe.
-  See [the calibration notes](x4prosim/sdcal/README.md) for all 30 rows,
+  See [the calibration notes](x4prosim/sdcal/cpu.md) for all 30 rows,
   residual errors, raw emulator output and reproduction steps.
 
   | Property | X3 default (µs) | Interval |
@@ -245,14 +254,14 @@ Notes:
   | `read-access-us` | 207 | R1 to the first CMD17/CMD18 token for a random start |
   | `read-seq-access-us` | 136 | Same interval immediately after the last completed read block |
   | `read-repeat-us` | 108 | Same interval when repeating the previous read command's start |
-  | `read-next-us` | 12 | End of one CMD18 block's CRC to the next token |
+  | `read-next-us` | 9 | End of one CMD18 block's CRC to the next token |
   | `write-busy-us` | 554 | CMD24 busy after a sequential write's data response |
   | `write-random-busy-us` | 621 | CMD24 busy for a random start |
   | `write-repeat-busy-us` | 479 | CMD24 busy for a repeated start |
   | `write-block-busy-us` | 10 | Busy after every CMD25 block's data response |
   | `write-stop-busy-us` | 480 | Base busy time after CMD25 STOP_TRAN |
-  | `write-stop-decrement-us` | 26 | Reduction in stop busy for each completed CMD25 block |
-  | `write-stop-random-extra-us` | 205 | Extra stop busy for a random command start |
+  | `write-stop-decrement-us` | -40 | Signed reduction per CMD25 block; negative adds busy time |
+  | `write-stop-random-extra-us` | 100 | Extra stop busy for a random command start |
 
   STOP_TRAN busy is `max(0, base + random_extra - decrement * blocks)`, clamped
   to UINT32_MAX microseconds. SdFat does not wait after STOP_TRAN: any remaining

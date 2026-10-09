@@ -22,8 +22,11 @@ sock = f"/tmp/x4prosim-{os.getpid()}.sock"
 if not os.path.exists(sd):
     subprocess.run([sys.executable, os.path.join(here, "mksd.py"), sd], check=True)
 subprocess.run(["cp", img, img + ".run"], check=True)
-# icount: guest time follows instructions (~240 MHz), not host speed, so light-sleep timing can't overshoot.
-p = subprocess.Popen([qemu, "-machine", machine, "-icount", "shift=2,sleep=on", "-display", "none", "-serial", "null",
+# X3 regional instruction costs are nanoseconds; Xtensa keeps 4 ns ticks.
+icount_shift = 0 if machine == "x3" else 2
+p = subprocess.Popen([qemu, "-machine", machine,
+                      "-icount", f"shift={icount_shift},sleep=on",
+                      "-display", "none", "-serial", "null",
                       "-drive", f"file={img}.run,if=mtd,format=raw", "-drive", f"file={sd},if=sd,format=raw",
                       "-chardev", f"file,id=cdc,path={log}",
                       "-global", "driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc",

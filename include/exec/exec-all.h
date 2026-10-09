@@ -29,6 +29,8 @@
 #include "exec/translation-block.h"
 #include "qemu/clang-tsa.h"
 
+unsigned tb_insns_for_ticks(const TranslationBlock *tb, unsigned ticks);
+
 /**
  * cpu_loop_exit_requested:
  * @cpu: The CPU state to be tested

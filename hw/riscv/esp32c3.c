@@ -358,6 +358,29 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* Initialize SoC */
     object_initialize_child(OBJECT(ms), "soc", &ms->soc, TYPE_ESP_RISCV_CPU);
+    if (object_dynamic_cast(OBJECT(machine), TYPE_X3_MACHINE)) {
+        const struct {
+            const char *name;
+            uint8_t ns;
+        } cpu_costs[] = {
+            { "cost-rom-ns", 6 },
+            { "cost-sram-ns", 8 },
+            { "cost-flash-ns", 10 },
+            { "cost-load", 0 },
+            { "cost-store", 3 },
+            { "cost-mul", 0 },
+            { "cost-div", 160 },
+            { "cost-branch", 2 },
+        };
+
+        /* X3 uses -icount shift=0: costs are nanoseconds at 160 MHz. */
+        for (size_t i = 0; i < ARRAY_SIZE(cpu_costs); i++) {
+            if (!qdev_find_global_prop(OBJECT(&ms->soc), cpu_costs[i].name)) {
+                qdev_prop_set_uint8(DEVICE(&ms->soc), cpu_costs[i].name,
+                                    cpu_costs[i].ns);
+            }
+        }
+    }
     qdev_prop_set_uint64(DEVICE(&ms->soc), "resetvec", ESP32C3_RESET_ADDRESS);
 
     /* Initialize the memory mapping */
@@ -523,13 +546,13 @@ static void esp32c3_machine_init(MachineState *machine)
         if (object_dynamic_cast(OBJECT(machine), TYPE_X3_MACHINE)) {
             Object *spi = OBJECT(ms->spi2);
 
-            /* Fit command and buffered-data phases separately at icount=2. */
+            /* Residual setup after charging the calibrated CPU driver time. */
             if (!qdev_find_global_prop(spi, "transaction-overhead-us") &&
                 !qdev_find_global_prop(spi, "transaction-overhead-ns")) {
-                qdev_prop_set_uint32(ms->spi2, "transaction-overhead-ns", 1450);
+                qdev_prop_set_uint32(ms->spi2, "transaction-overhead-ns", 700);
             }
             if (!qdev_find_global_prop(spi, "buffer-overhead-ns")) {
-                qdev_prop_set_uint32(ms->spi2, "buffer-overhead-ns", 1875);
+                qdev_prop_set_uint32(ms->spi2, "buffer-overhead-ns", 300);
             }
         }
         object_property_add_child(OBJECT(machine), "spi2", OBJECT(ms->spi2));
@@ -581,6 +604,8 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* System clock realization */
     {
+        object_property_set_link(OBJECT(&ms->clock), "cpu",
+                                 OBJECT(&ms->soc), &error_abort);
         sysbus_realize(SYS_BUS_DEVICE(&ms->clock), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->clock), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_SYSTEM_BASE, mr, 0);
@@ -844,28 +869,32 @@ static void x3_board_init(Esp32C3MachineState *ms)
     qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 10), 1);
 
     DeviceState *sd = qdev_new("ssi-sd");
-    /* X3 card probe medians: see timing-evidence/calibration.md. */
+    /* X3 card probe medians: see x4prosim/sdcal/cpu.md. */
     const struct {
         const char *name;
-        uint32_t us;
+        int32_t us;
     } sd_timings[] = {
         { "read-access-us", 207 },
         { "read-seq-access-us", 136 },
         { "read-repeat-us", 108 },
-        { "read-next-us", 12 },
+        { "read-next-us", 9 },
         { "write-busy-us", 554 },
         { "write-random-busy-us", 621 },
         { "write-repeat-busy-us", 479 },
         { "write-block-busy-us", 10 },
         { "write-stop-busy-us", 480 },
-        { "write-stop-decrement-us", 26 },
-        { "write-stop-random-extra-us", 205 },
+        { "write-stop-decrement-us", -40 },
+        { "write-stop-random-extra-us", 100 },
     };
 
     for (size_t i = 0; i < ARRAY_SIZE(sd_timings); i++) {
         /* qdev_new already applied -global: preserve explicit overrides. */
         if (!qdev_find_global_prop(OBJECT(sd), sd_timings[i].name)) {
-            qdev_prop_set_uint32(sd, sd_timings[i].name, sd_timings[i].us);
+            if (!strcmp(sd_timings[i].name, "write-stop-decrement-us")) {
+                qdev_prop_set_int32(sd, sd_timings[i].name, sd_timings[i].us);
+            } else {
+                qdev_prop_set_uint32(sd, sd_timings[i].name, sd_timings[i].us);
+            }
         }
     }
     qdev_prop_set_uint8(sd, "cs", 1);       /* the SSI bus wants distinct CS indexes */

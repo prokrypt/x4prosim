@@ -92,7 +92,7 @@ struct ssi_sd_state {
     uint32_t write_repeat_busy_us;
     uint32_t write_block_busy_us;
     uint32_t write_stop_busy_us;
-    uint32_t write_stop_decrement_us;
+    int32_t write_stop_decrement_us;
     uint32_t write_stop_random_extra_us;
     int64_t read_deadline_ns;
     int64_t busy_deadline_ns;
@@ -219,13 +219,18 @@ dispatch:
 
             if (s->cmd == 25) {
                 uint64_t busy_us = s->write_stop_busy_us;
-                uint64_t credit_us = (uint64_t)s->write_stop_decrement_us *
-                                     s->write_blocks;
+                int64_t credit_us = (int64_t)s->write_stop_decrement_us *
+                                    s->write_blocks;
 
                 if (s->random_write) {
                     busy_us += s->write_stop_random_extra_us;
                 }
-                busy_us -= MIN(busy_us, credit_us);
+                if (credit_us >= 0) {
+                    busy_us -= MIN(busy_us, credit_us);
+                } else {
+                    /* Negative decrement models growth with burst length. */
+                    busy_us += MIN((uint64_t)-credit_us, UINT32_MAX);
+                }
                 s->busy_deadline_ns = ssi_sd_deadline(s, "write-stop",
                                                      MIN(busy_us, UINT32_MAX));
             }
@@ -618,7 +623,7 @@ static Property ssi_sd_properties[] = {
                        write_repeat_busy_us, 0),
     DEFINE_PROP_UINT32("write-block-busy-us", ssi_sd_state,
                        write_block_busy_us, 0),
-    DEFINE_PROP_UINT32("write-stop-decrement-us", ssi_sd_state,
+    DEFINE_PROP_INT32("write-stop-decrement-us", ssi_sd_state,
                        write_stop_decrement_us, 0),
     DEFINE_PROP_UINT32("write-stop-random-extra-us", ssi_sd_state,
                        write_stop_random_extra_us, 0),
