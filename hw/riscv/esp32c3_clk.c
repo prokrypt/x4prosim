@@ -20,6 +20,9 @@
 #include "hw/riscv/esp32c3_clk.h"
 #include "hw/riscv/esp32c3_clk_defs.h"
 #include "exec/cpu-common.h"
+#include "exec/tb-flush.h"
+#include "cpu.h"
+#include "trace.h"
 #include <zlib.h>
 
 #define ESP32C3_RTC_FASTMEM_BASE 0x50000000
@@ -48,6 +51,47 @@ static void esp32c3_rtc_mem_crc(ESP32C3ClockState *s, uint32_t value)
 
 #define CLOCK_DEBUG      0
 #define CLOCK_WARNING    0
+
+/*
+ * SYSTEM clock mux: PLL 80/160 MHz or XTAL/RC divided by PRE_DIV_CNT+1.
+ * Cost scaling is relative to 160 MHz. MMIO writes end an icount TB; flush
+ * translations and force dispatcher re-entry before executing at the new rate.
+ */
+static void esp32c3_clock_update(ESP32C3ClockState *s)
+{
+    unsigned source = FIELD_EX32(s->sysclk, SYSTEM_SYSCLK_CONF, SOC_CLK_SEL);
+    unsigned divider =
+        FIELD_EX32(s->sysclk, SYSTEM_SYSCLK_CONF, PRE_DIV_CNT) + 1;
+    uint32_t hz;
+
+    switch (source) {
+    case ESP32C3_CLK_SEL_PLL:
+        hz = FIELD_EX32(s->cpuperconf, SYSTEM_CPU_PER_CONF, CPUPERIOD_SEL) ==
+             ESP32C3_PERIOD_SEL_160 ? 160000000 : 80000000;
+        break;
+    case ESP32C3_CLK_SEL_XTAL:
+        hz = 40000000 / divider;
+        break;
+    case ESP32C3_CLK_SEL_RCFAST:
+        hz = 17500000 / divider;
+        break;
+    default:
+        return; /* Reserved mux selection: retain the previous rate. */
+    }
+    if (hz != s->cpu_hz) {
+        unsigned scale = DIV_ROUND_UP(160000000, hz);
+        s->cpu_hz = hz;
+        trace_esp32c3_cpu_clock(hz, scale, s->sysclk, s->cpuperconf);
+        if (s->cpu) {
+            RISCVCPU *cpu = RISCV_CPU(s->cpu);
+            if (cpu->cost_clock_scale != scale) {
+                cpu->cost_clock_scale = scale;
+                tb_flush(s->cpu);
+                cpu_interrupt(s->cpu, CPU_INTERRUPT_EXITTB);
+            }
+        }
+    }
+}
 
 static uint32_t esp32c3_read_cpu_intr(ESP32C3ClockState *s, uint32_t index)
 {
@@ -114,27 +158,39 @@ static void esp32c3_clock_write(void *opaque, hwaddr addr, uint64_t value,
     ESP32C3ClockState *s = ESP32C3_CLOCK(opaque);
 
     switch(addr) {
-        case A_SYSTEM_CPU_INTR_FROM_CPU_0:
-        case A_SYSTEM_CPU_INTR_FROM_CPU_1:
-        case A_SYSTEM_CPU_INTR_FROM_CPU_2:
-        case A_SYSTEM_CPU_INTR_FROM_CPU_3:
-            esp32c3_write_cpu_intr(s, (addr - A_SYSTEM_CPU_INTR_FROM_CPU_0) / sizeof(uint32_t), value);
-            break;
-        case A_SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL:
-            s->sys_ext_dev_enc_dec_ctrl = value;
-            break;
-        case A_SYSTEM_RTC_FASTMEM_CONFIG:
-            s->rtc_fastmem_config = value & ~R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_FINISH_MASK;
-            if (value & R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_START_MASK) {
-                esp32c3_rtc_mem_crc(s, value);
-                s->rtc_fastmem_config |= R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_FINISH_MASK;
-            }
-            break;
-        default:
+    case A_SYSTEM_CPU_PER_CONF:
+        s->cpuperconf = value;
+        esp32c3_clock_update(s);
+        break;
+    case A_SYSTEM_SYSCLK_CONF:
+        s->sysclk = value;
+        esp32c3_clock_update(s);
+        break;
+    case A_SYSTEM_CPU_INTR_FROM_CPU_0:
+    case A_SYSTEM_CPU_INTR_FROM_CPU_1:
+    case A_SYSTEM_CPU_INTR_FROM_CPU_2:
+    case A_SYSTEM_CPU_INTR_FROM_CPU_3:
+        esp32c3_write_cpu_intr(s,
+            (addr - A_SYSTEM_CPU_INTR_FROM_CPU_0) / sizeof(uint32_t), value);
+        break;
+    case A_SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL:
+        s->sys_ext_dev_enc_dec_ctrl = value;
+        break;
+    case A_SYSTEM_RTC_FASTMEM_CONFIG:
+        s->rtc_fastmem_config = value &
+            ~R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_FINISH_MASK;
+        if (value & R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_START_MASK) {
+            esp32c3_rtc_mem_crc(s, value);
+            s->rtc_fastmem_config |=
+                R_SYSTEM_RTC_FASTMEM_CONFIG_RTC_MEM_CRC_FINISH_MASK;
+        }
+        break;
+    default:
 #if CLOCK_WARNING
-            warn_report("[CLOCK] Unsupported write to %08lx (%08lx)\n", addr, value);
+        warn_report("[CLOCK] Unsupported write to %08lx (%08lx)",
+                    addr, value);
 #endif
-            break;
+        break;
     }
 }
 
@@ -156,6 +212,8 @@ static void esp32c3_clock_reset_hold(Object *obj, ResetType type)
     /* Divider for PLL clock and APB  frequency */
     s->cpuperconf = (ESP32C3_PERIOD_SEL_80 << R_SYSTEM_CPU_PER_CONF_CPUPERIOD_SEL_SHIFT) |
                     (ESP32C3_FREQ_SEL_PLL_480 << R_SYSTEM_CPU_PER_CONF_PLL_FREQ_SEL_SHIFT);
+
+    esp32c3_clock_update(s);
 
     /* Initialize the IRQs */
     s->levels = 0;
@@ -185,6 +243,11 @@ static void esp32c3_clock_init(Object *obj)
     }
 }
 
+static Property esp32c3_clock_properties[] = {
+    DEFINE_PROP_LINK("cpu", ESP32C3ClockState, cpu, TYPE_CPU, CPUState *),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void esp32c3_clock_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -193,6 +256,7 @@ static void esp32c3_clock_class_init(ObjectClass *klass, void *data)
 
     rc->phases.hold = esp32c3_clock_reset_hold;
     dc->realize = esp32c3_clock_realize;
+    device_class_set_props(dc, esp32c3_clock_properties);
 
     esp32c3_clock->get_ext_dev_enc_dec_ctrl = esp32c3_clock_get_ext_dev_enc_dec_ctrl;
 }
