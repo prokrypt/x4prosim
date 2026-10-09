@@ -2,12 +2,17 @@
  * SSI to SD card adapter.
  *
  * Optional uint32 QOM latencies, in microseconds (all default to zero):
- * read-access-us / read-seq-access-us delay the first CMD17/18 token from R1,
- * read-next-us delays subsequent CMD18 tokens from the preceding block CRC,
- * write-busy-us / write-random-busy-us hold busy after a write data response,
- * and write-stop-busy-us holds busy after CMD25's STOP_TRAN token.
- * Sequential means the sector immediately after the last completed block of
- * the same direction; the first write block alone can use random write time.
+ * read-repeat-us / read-seq-access-us / read-access-us delay the first CMD17/18
+ * token from R1 for repeated, sequential and random starts, respectively.
+ * read-next-us delays subsequent CMD18 tokens from the preceding block CRC.
+ * CMD24 busy after its data response uses write-repeat-busy-us, write-busy-us
+ * or write-random-busy-us for those patterns; CMD25 uses write-block-busy-us.
+ * STOP_TRAN busy is max(0, write-stop-busy-us + random_extra - decrement * n),
+ * where n is the completed CMD25 block count, decrement is
+ * write-stop-decrement-us and random_extra is write-stop-random-extra-us for
+ * random starts (zero otherwise). Clamp the result to UINT32_MAX microseconds.
+ * Repeated means the previous command's start sector; it takes precedence over
+ * sequential, the sector after the last completed block in the same direction.
  * Deadlines use QEMU_CLOCK_VIRTUAL: polling returns 0xff before a read token,
  * or 0x00 during write busy, without sleeping on the host. Boards can select
  * defaults; override them with -global ssi-sd.<property>=<microseconds>.
@@ -80,19 +85,29 @@ struct ssi_sd_state {
     bool idle;          /* R1 idle bit of the last status, for R3/R7 */
     uint32_t read_access_us;
     uint32_t read_seq_access_us;
+    uint32_t read_repeat_us;
     uint32_t read_next_us;
     uint32_t write_busy_us;
     uint32_t write_random_busy_us;
+    uint32_t write_repeat_busy_us;
+    uint32_t write_block_busy_us;
     uint32_t write_stop_busy_us;
+    uint32_t write_stop_decrement_us;
+    uint32_t write_stop_random_extra_us;
     int64_t read_deadline_ns;
     int64_t busy_deadline_ns;
     uint64_t sector;
     uint64_t next_read_sector;
     uint64_t next_write_sector;
+    uint64_t last_read_start;
+    uint64_t last_write_start;
+    uint64_t write_start;
+    uint32_t write_blocks;
     bool read_history;
     bool write_history;
     bool high_capacity;
     bool random_write;
+    bool repeat_write;
     bool write_response;
     SDBus sdbus;
 };
@@ -203,8 +218,16 @@ dispatch:
             }
 
             if (s->cmd == 25) {
+                uint64_t busy_us = s->write_stop_busy_us;
+                uint64_t credit_us = (uint64_t)s->write_stop_decrement_us *
+                                     s->write_blocks;
+
+                if (s->random_write) {
+                    busy_us += s->write_stop_random_extra_us;
+                }
+                busy_us -= MIN(busy_us, credit_us);
                 s->busy_deadline_ns = ssi_sd_deadline(s, "write-stop",
-                                                     s->write_stop_busy_us);
+                                                     MIN(busy_us, UINT32_MAX));
             }
             return SSI_DUMMY;
         }
@@ -315,8 +338,15 @@ dispatch:
                 (s->cmd == 17 || s->cmd == 18 ||
                  s->cmd == 24 || s->cmd == 25)) {
                 s->sector = s->high_capacity ? request.arg : request.arg / 512;
-                s->random_write = !s->write_history ||
-                                  s->sector != s->next_write_sector;
+                if (s->cmd == 24 || s->cmd == 25) {
+                    s->repeat_write = s->write_history &&
+                                      s->sector == s->last_write_start;
+                    s->random_write = !s->repeat_write &&
+                        (!s->write_history ||
+                         s->sector != s->next_write_sector);
+                    s->write_start = s->sector;
+                    s->write_blocks = 0;
+                }
             }
             s->mode = SSI_SD_PREP_RESP;
             s->response_pos = 0;
@@ -334,20 +364,32 @@ dispatch:
             if (s->write_response) {
                 s->write_response = false;
                 s->busy_deadline_ns = ssi_sd_deadline(s,
+                    s->cmd == 25 ? "write-block" :
+                    s->repeat_write ? "write-repeat" :
                     s->random_write ? "write-random" : "write",
+                    s->cmd == 25 ? s->write_block_busy_us :
+                    s->repeat_write ? s->write_repeat_busy_us :
                     s->random_write ? s->write_random_busy_us :
                                       s->write_busy_us);
                 s->next_write_sector = ++s->sector;
+                s->last_write_start = s->write_start;
+                if (s->write_blocks < UINT32_MAX) {
+                    s->write_blocks++;
+                }
                 s->write_history = true;
-                s->random_write = false;
             } else if (s->response_pos == 0 && s->response[0] == 0 &&
                        (s->cmd == 17 || s->cmd == 18)) {
                 bool sequential = s->read_history &&
                                   s->sector == s->next_read_sector;
+                bool repeated = s->read_history &&
+                                s->sector == s->last_read_start;
 
                 s->read_deadline_ns = ssi_sd_deadline(s,
+                    repeated ? "read-repeat" :
                     sequential ? "read-seq-access" : "read-access",
+                    repeated ? s->read_repeat_us :
                     sequential ? s->read_seq_access_us : s->read_access_us);
+                s->last_read_start = s->sector;
             }
             return s->response[s->response_pos++];
         }
@@ -464,13 +506,16 @@ static bool ssi_sd_timing_needed(void *opaque)
 {
     ssi_sd_state *s = opaque;
 
-    return s->read_access_us || s->read_seq_access_us || s->read_next_us ||
-           s->write_busy_us || s->write_random_busy_us || s->write_stop_busy_us;
+    return s->read_access_us || s->read_seq_access_us || s->read_repeat_us ||
+           s->read_next_us || s->write_busy_us || s->write_random_busy_us ||
+           s->write_repeat_busy_us || s->write_block_busy_us ||
+           s->write_stop_busy_us || s->write_stop_decrement_us ||
+           s->write_stop_random_extra_us;
 }
 
 static const VMStateDescription vmstate_ssi_sd_timing = {
     .name = "ssi_sd/timing",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .needed = ssi_sd_timing_needed,
     .fields = (const VMStateField []) {
@@ -485,6 +530,11 @@ static const VMStateDescription vmstate_ssi_sd_timing = {
         VMSTATE_BOOL(random_write, ssi_sd_state),
         VMSTATE_BOOL(write_response, ssi_sd_state),
         VMSTATE_BOOL(idle, ssi_sd_state),
+        VMSTATE_UINT64_V(last_read_start, ssi_sd_state, 2),
+        VMSTATE_UINT64_V(last_write_start, ssi_sd_state, 2),
+        VMSTATE_UINT64_V(write_start, ssi_sd_state, 2),
+        VMSTATE_UINT32_V(write_blocks, ssi_sd_state, 2),
+        VMSTATE_BOOL_V(repeat_write, ssi_sd_state, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -541,10 +591,15 @@ static void ssi_sd_reset(DeviceState *dev)
     s->sector = 0;
     s->next_read_sector = 0;
     s->next_write_sector = 0;
+    s->last_read_start = 0;
+    s->last_write_start = 0;
+    s->write_start = 0;
+    s->write_blocks = 0;
     s->read_history = false;
     s->write_history = false;
     s->high_capacity = false;
     s->random_write = false;
+    s->repeat_write = false;
     s->write_response = false;
 }
 
@@ -553,11 +608,20 @@ static Property ssi_sd_properties[] = {
     DEFINE_PROP_UINT32("read-seq-access-us", ssi_sd_state,
                        read_seq_access_us, 0),
     DEFINE_PROP_UINT32("read-next-us", ssi_sd_state, read_next_us, 0),
+    DEFINE_PROP_UINT32("read-repeat-us", ssi_sd_state, read_repeat_us, 0),
     DEFINE_PROP_UINT32("write-busy-us", ssi_sd_state, write_busy_us, 0),
     DEFINE_PROP_UINT32("write-random-busy-us", ssi_sd_state,
                        write_random_busy_us, 0),
     DEFINE_PROP_UINT32("write-stop-busy-us", ssi_sd_state,
                        write_stop_busy_us, 0),
+    DEFINE_PROP_UINT32("write-repeat-busy-us", ssi_sd_state,
+                       write_repeat_busy_us, 0),
+    DEFINE_PROP_UINT32("write-block-busy-us", ssi_sd_state,
+                       write_block_busy_us, 0),
+    DEFINE_PROP_UINT32("write-stop-decrement-us", ssi_sd_state,
+                       write_stop_decrement_us, 0),
+    DEFINE_PROP_UINT32("write-stop-random-extra-us", ssi_sd_state,
+                       write_stop_random_extra_us, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 

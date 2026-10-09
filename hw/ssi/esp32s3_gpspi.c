@@ -4,7 +4,10 @@
  * Setting CMD.USR shifts MS_DLEN+1 bits out of W0..W15 (byte 0 = W0 bits 7:0)
  * onto the SSI bus at the end of its SPI_CLOCK wire time, stores what comes
  * back in the same buffer, then clears USR and raises TRANS_DONE. A virtual
- * timer adds the optional transaction-overhead-us (default zero).
+ * timer adds transaction-overhead-us plus transaction-overhead-ns. Transfers
+ * longer than one byte also add buffer-overhead-ns for the buffered PIO path.
+ * These effective setup costs default to zero; boards can calibrate them with
+ * the guest driver's existing instruction time included in the measurement.
  * CMD.UPDATE self-clears. DMA, address/command/dummy phases and
  * hardware CS are not modeled: the X4 Pro drives CS and DC from GPIO.
  *
@@ -52,6 +55,8 @@ struct Esp32s3GpspiState {
     uint32_t int_ena;
     QEMUTimer *transfer_timer;
     uint32_t transaction_overhead_us;
+    uint32_t transaction_overhead_ns;
+    uint32_t buffer_overhead_ns;
     uint32_t transfer_bytes;
     uint8_t transfer_buf[64];
 };
@@ -87,6 +92,10 @@ static void gpspi_start_transfer(Esp32s3GpspiState *s)
                           (uint64_t)s->transaction_overhead_us * 1000;
 
     s->transfer_bytes = DIV_ROUND_UP(bits, 8);
+    duration_ns += s->transaction_overhead_ns;
+    if (s->transfer_bytes > 1) {
+        duration_ns += s->buffer_overhead_ns;
+    }
     memcpy(s->transfer_buf, &s->regs[R_W0 / 4], s->transfer_bytes);
     trace_esp32s3_gpspi_transfer(80000000 / divider, s->transfer_bytes,
                                duration_ns);
@@ -176,6 +185,10 @@ static void gpspi_reset(DeviceState *dev)
 static Property gpspi_properties[] = {
     DEFINE_PROP_UINT32("transaction-overhead-us", Esp32s3GpspiState,
                        transaction_overhead_us, 0),
+    DEFINE_PROP_UINT32("transaction-overhead-ns", Esp32s3GpspiState,
+                       transaction_overhead_ns, 0),
+    DEFINE_PROP_UINT32("buffer-overhead-ns", Esp32s3GpspiState,
+                       buffer_overhead_ns, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
