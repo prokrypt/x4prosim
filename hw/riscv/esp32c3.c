@@ -816,6 +816,24 @@ static void x3_board_init(Esp32C3MachineState *ms)
     qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 10), 1);
 
     DeviceState *sd = qdev_new("ssi-sd");
+    const struct {
+        const char *name;
+        uint32_t us;
+    } sd_timings[] = {
+        { "read-access-us", 120 },
+        { "read-seq-access-us", 60 },
+        { "read-next-us", 40 },
+        { "write-busy-us", 1500 },
+        { "write-random-busy-us", 4000 },
+        { "write-stop-busy-us", 1500 },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(sd_timings); i++) {
+        /* qdev_new already applied -global: preserve explicit overrides. */
+        if (!qdev_find_global_prop(OBJECT(sd), sd_timings[i].name)) {
+            qdev_prop_set_uint32(sd, sd_timings[i].name, sd_timings[i].us);
+        }
+    }
     qdev_prop_set_uint8(sd, "cs", 1);       /* the SSI bus wants distinct CS indexes */
     ssi_realize_and_unref(sd, bus, &error_fatal);
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 12, qdev_get_gpio_in_named(sd, SSI_GPIO_CS, 0));

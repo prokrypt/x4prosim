@@ -215,6 +215,39 @@ the gauge and the SD card readable and writable. Hardware (freeink-sdk
 | Wi-Fi | MAC + fake open AP bridged to `-nic user` | n/a | the S3 models at the same bases (`esp32s3_wifi.c`, `esp32s3_ana.c`, `esp32_fe.c`) |
 
 Notes:
+- GPSPI2 completes CPU transfers on a virtual-clock timer. `SPI_CLOCK` selects
+  an 80 MHz APB clock divided by `(clkdiv_pre + 1) * (clkcnt_n + 1)`, or 80 MHz
+  directly with `clk_equ_sysclk`. The rate is sampled for each transaction, so
+  the SD card's 40 MHz and the panel's 10 MHz both consume their wire time.
+  `CMD.USR` stays set until the bytes reach the slave and `TRANS_DONE` is raised.
+  The `transaction-overhead-us` property controls extra setup time per
+  transaction; zero is the default because it has not been measured. Set it with
+  `-global driver=ssi.esp32s3.gpspi,property=transaction-overhead-us,value=0`
+  (the explicit form is needed because the device type contains dots).
+- SD timing uses virtual-clock deadlines, including under
+  `-icount shift=2,sleep=on`. Polling reads return `0xff` until a data token is
+  ready; polling writes return busy (`0x00`) after the data response token.
+  The following `ssi-sd` uint32 properties are in microseconds. Their generic
+  defaults are zero; the X3 sets these provisional values for a card at 40 MHz,
+  pending calibration against the device:
+
+  | Property | X3 default (µs) | Interval |
+  | --- | ---: | --- |
+  | `read-access-us` | 120 | R1 to the first CMD17/CMD18 data token for a nonsequential read |
+  | `read-seq-access-us` | 60 | Same interval when starting immediately after the last completed read block |
+  | `read-next-us` | 40 | End of one CMD18 block's CRC to the next block's data token |
+  | `write-busy-us` | 1500 | Busy after each CMD24/CMD25 data response |
+  | `write-random-busy-us` | 4000 | Replaces write busy for the first block when the command starts anywhere other than after the last completed write block |
+  | `write-stop-busy-us` | 1500 | Busy after CMD25's STOP_TRAN token |
+
+  Override any value with, for example,
+  `-global ssi-sd.read-access-us=200 -global ssi-sd.write-busy-us=2000`.
+  Read and write histories are independent; the first access is nonsequential.
+  No command response delay is added. Trace decisions and bus transactions with
+  `-d 'trace:ssi_sd_*,trace:esp32s3_gpspi_*' -D spi-timing.log`, or use
+  `--trace 'enable=ssi_sd_*' --trace 'enable=esp32s3_gpspi_*'`.
+  Both panel and SD transfers consume bus time; setting all six card latencies
+  to zero disables only the card delays.
 - The panel model is simpler than the UC8179's: the register LUTs move the ink per
   phase ((frames - `dead-frames`) / `swing-frames` of the way, so a one-frame
   balance pulse does nothing), BUSY_N lasts the LUT's frames x `frame-us`
