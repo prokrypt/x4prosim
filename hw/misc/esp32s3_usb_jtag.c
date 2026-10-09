@@ -2,8 +2,9 @@
  * ESP32-S3 USB Serial/JTAG controller: CDC serial side only.
  *
  * Bytes the firmware writes to EP1 go to the "chardev" backend; bytes from the
- * backend are readable from EP1. A 1 kHz SOF interrupt makes Arduino's HWCDC
- * see a connected host (it treats 5 ms without SOF as unplugged).
+ * backend are readable from EP1. The SOF status bit always reads as set, a
+ * 1 kHz SOF interrupt ticks and the frame counter follows virtual time, so
+ * Arduino's HWCDC and IDF's plug watchdog always see a connected host.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -55,12 +56,26 @@ struct Esp32s3UsbJtagState {
     uint32_t frame;
 };
 
+/*
+ * A host that is plugged in sends a SOF every millisecond, so the SOF status
+ * bit reads as set whenever the guest looks: IDF's plug watchdog clears it in
+ * every FreeRTOS tick hook and declares the host gone after five hooks that
+ * found it clear. QEMU can run several ticks inside one virtual millisecond
+ * (bunched timer deadlines), so a SOF that only came from the 1 ms timer went
+ * missing often enough that Arduino's HWCDC marked the link down and cut a
+ * 52 KB screenshot write to its 256-byte ring. Unplugging isn't modeled.
+ */
+static uint32_t usb_jtag_sof_pending(Esp32s3UsbJtagState *s)
+{
+    return INT_SOF;
+}
+
 static void usb_jtag_update_irq(Esp32s3UsbJtagState *s)
 {
     if (!fifo8_is_empty(&s->rx)) {
         s->int_raw |= INT_OUT_RECV_PKT;
     }
-    qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
+    qemu_set_irq(s->irq, ((s->int_raw | usb_jtag_sof_pending(s)) & s->int_ena) != 0);
 }
 
 static uint64_t usb_jtag_read(void *opaque, hwaddr addr, unsigned int size)
@@ -80,16 +95,21 @@ static uint64_t usb_jtag_read(void *opaque, hwaddr addr, unsigned int size)
         r = CONF_IN_DATA_FREE | (fifo8_is_empty(&s->rx) ? 0 : CONF_OUT_DATA_AVAIL);
         break;
     case R_INT_RAW:
-        r = s->int_raw;
+        r = s->int_raw | usb_jtag_sof_pending(s);
         break;
     case R_INT_ST:
-        r = s->int_raw & s->int_ena;
+        r = (s->int_raw | usb_jtag_sof_pending(s)) & s->int_ena;
         break;
     case R_INT_ENA:
         r = s->int_ena;
         break;
     case R_FRAM_NUM:
-        r = s->frame & 0x7ff;
+        /*
+         * The host's SOF count follows virtual time, not the 1 ms timer: the
+         * guest's plug watchdog samples it every tick and would see a stalled
+         * counter whenever the main loop lagged, then drop its TX ring.
+         */
+        r = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) & 0x7ff;
         break;
     case R_DATE:
         r = 0x2101200;

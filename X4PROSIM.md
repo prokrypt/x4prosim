@@ -230,6 +230,13 @@ Notes:
   nobody sees it. `mkflash.sh` seeds exactly that key (`mknvs.py`) on C3 images.
 - `mksd.py` needs `mkfs.vfat` and `mcopy` (`brew install dosfstools mtools`; the
   build needs `brew install libslirp` too).
+- Serial control (CrossPoint's `scripts/debugging_monitor.py` / `device_control.py`
+  from the serial-device-control branch): give the console a pty instead of stdio,
+  `-chardev pty,id=cdc` (QEMU prints the `/dev/ttysN` it made on stdout), and start
+  the monitor on that path: `debugging_monitor.py --serve --headless /dev/ttysN`.
+  PRESS/STATE/CANCEL/SCREENSHOT work as on the device; a 52 KB screenshot takes ~0.5 s.
+  Verified 2026-10-09 with the X3/X4 develop build plus that branch (28-step scenario:
+  Home, Browse Files, reader page turns, reader menu, hold/cancel, Settings, Library).
 - `hw/sd/ssi-sd.c` fixes for SdFat: R3/R7 carry the real idle bit (CMD58 after
   ACMD41 is 0x00), a write's data token right after R1 is taken (no fill byte),
   CMD13 answers an SPI R2.
