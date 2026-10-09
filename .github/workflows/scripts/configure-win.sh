@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# x4prosim: no -Werror on Windows: newer MinGW GCC warns in upstream test code (libqtest.c)
 
 TARGET=${TARGET:-xtensa-softmmu}
 VERSION=${VERSION:-dev}
@@ -16,7 +17,7 @@ echo DBG
     --enable-pixman \
     --enable-slirp \
     --enable-stack-protector \
-    --extra-cflags=-Werror \
+    --disable-werror \
     --prefix=${PWD}/install/qemu \
     --static \
     --target-list=${TARGET} \
