@@ -84,6 +84,12 @@ static void gpio_update(ESP32S3GPIOState *s)
     uint64_t in = gpio_in(s);
     uint64_t rise = in & ~s->last_in, fall = ~in & s->last_in;
 
+    for (int i = 0; i < ESP32S3_GPIO_RTC_PAD_COUNT; i++) {
+        if ((rise | fall) & (1ULL << i)) {
+            qemu_set_irq(s->rtc_pad[i], (in >> i) & 1);
+        }
+    }
+
     for (int i = 0; i < ESP32S3_GPIO_COUNT; i++) {
         uint64_t b = 1ULL << i;
         switch (PIN_INT_TYPE(s->pin[i])) {
@@ -201,6 +207,9 @@ static void esp32s3_gpio_reset_hold(Object *obj, ResetType type)
     s->out_reg = s->enable = s->status = 0;
     memset(s->pin, 0, sizeof(s->pin));
     s->last_in = gpio_in(s);
+    for (int i = 0; i < ESP32S3_GPIO_RTC_PAD_COUNT; i++) {
+        qemu_set_irq(s->rtc_pad[i], (s->last_in >> i) & 1);
+    }
 }
 
 static void esp32s3_gpio_init(Object *obj)
@@ -214,6 +223,7 @@ static void esp32s3_gpio_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), gpio_set_in, ESP32S3_GPIO_IN, ESP32S3_GPIO_COUNT);
     qdev_init_gpio_out_named(DEVICE(obj), s->out, ESP32S3_GPIO_OUT, ESP32S3_GPIO_COUNT);
     qdev_init_gpio_out_named(DEVICE(obj), &s->wake, ESP32S3_GPIO_WAKE, 1);
+    qdev_init_gpio_out_named(DEVICE(obj), s->rtc_pad, ESP32S3_GPIO_RTC_PAD, ESP32S3_GPIO_RTC_PAD_COUNT);
 }
 
 static Property esp32s3_gpio_properties[] = {

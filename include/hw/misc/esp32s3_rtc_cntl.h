@@ -97,9 +97,23 @@ typedef struct Esp32s3RtcCntlState {
     int64_t sleep_start_ns;
     bool gpio_wake;
     QEMUTimer sleep_timer;
+
+    /* x4prosim: deep sleep (DG_WRAP_PD_EN) until ext0, ext1 or the RTC timer */
+    MemoryRegion rtcio_ext0;    /* RTC_IO_EXT_WAKEUP0, mapped by the SoC */
+    uint32_t dig_pwc;
+    uint32_t ext_wakeup_conf;
+    uint32_t ext_wakeup1;
+    uint32_t ext_wakeup1_status;
+    uint32_t ext0_reg;
+    uint32_t pad_level;         /* RTC GPIO 0..21 (= GPIO0..21) input levels */
+    int64_t deep_start_rt_ns;
+    QEMUTimer deep_timer;       /* realtime: the virtual clock stops while suspended */
 } Esp32s3RtcCntlState;
 
 #define ESP32S3_RTC_GPIO_WAKE "gpio-wake"
+#define ESP32S3_RTC_PAD       "rtc-pad"
+#define ESP32S3_RTC_PAD_COUNT 22
+#define ESP32S3_RTCIO_EXT_WAKEUP0_OFFSET 0xdc
 
 REG32(RTC_CNTL_OPTIONS0, 0x00)
     FIELD(RTC_CNTL_OPTIONS0, SW_SYS_RESET, 31, 1)

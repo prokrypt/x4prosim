@@ -1,6 +1,11 @@
 /*
  * ESP32 RTC_CNTL (RTC block controller) device
  *
+ * x4prosim adds light sleep (SLEEP_EN until the RTC timer or a GPIO wake) and
+ * deep sleep (SLEEP_EN with DIG_PWC DG_WRAP_PD_EN): the VM is suspended until
+ * ext0, ext1 or the RTC timer fires, then reset with reason DEEPSLEEP_RESET and
+ * the cause in SLP_WAKEUP_CAUSE (ext1 pads in EXT_WAKEUP1_STATUS).
+ *
  * Copyright (c) 2019-2024 Espressif Systems (Shanghai) Co. Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -20,6 +25,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/misc/esp32s3_reg.h"
 #include "hw/misc/esp32s3_rtc_cntl.h"
+#include "sysemu/runstate.h"
 
 static void esp32s3_rtc_update_cpu_stall(Esp32s3RtcCntlState* s);
 static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
@@ -34,12 +40,141 @@ static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
 #define R_INT_ST            0x48
 #define R_INT_CLR           0x4C
 #define R_SLP_WAKEUP_CAUSE  0x130
+#define R_EXT_WAKEUP_CONF   0x64
+#define R_DIG_PWC           0x90
+#define R_EXT_WAKEUP1       0xE0
+#define R_EXT_WAKEUP1_STATUS 0xE4
 #define STATE0_SLEEP_EN     BIT(31)
 #define SLP_TIMER1_ALARM_EN BIT(16)
 #define INT_SLP_WAKEUP      BIT(0)
+#define WAKE_EXT0           BIT(0)
+#define WAKE_EXT1           BIT(1)
 #define WAKE_GPIO           BIT(2)
 #define WAKE_TIMER          BIT(3)
 #define LIGHT_SLEEP_EARLY_NS (5 * SCALE_MS)
+#define DG_WRAP_PD_EN       BIT(31)
+#define EXT_WAKEUP0_LV      BIT(30)
+#define EXT_WAKEUP1_LV      BIT(31)
+#define EXT_WAKEUP1_SEL     0x3fffff
+#define EXT_WAKEUP1_STATUS_CLR BIT(22)
+#define PADS_ALL            ((1u << ESP32S3_RTC_PAD_COUNT) - 1)
+
+static uint32_t esp32s3_rtc_wake_ena(Esp32s3RtcCntlState *s)
+{
+    return (s->wakeup_state_reg >> 15) & 0x1ffff;
+}
+
+/*
+ * Deep-sleep pad sources at their wake level: ext0 is one pad (RTC_IO
+ * EXT_WAKEUP0 SEL) at EXT_WAKEUP0_LV; ext1 is any selected pad high (LV 1)
+ * or low (LV 0). *ext1_pads gets the ext1 pads that match.
+ */
+static uint32_t esp32s3_rtc_pads_awake(Esp32s3RtcCntlState *s, uint32_t *ext1_pads)
+{
+    uint32_t ena = esp32s3_rtc_wake_ena(s), cause = 0;
+    uint32_t sel0 = s->ext0_reg >> 27;
+    uint32_t lv1_pads = (s->ext_wakeup_conf & EXT_WAKEUP1_LV) ? s->pad_level : ~s->pad_level;
+
+    *ext1_pads = lv1_pads & s->ext_wakeup1 & EXT_WAKEUP1_SEL;
+    if ((ena & WAKE_EXT0) && sel0 < ESP32S3_RTC_PAD_COUNT &&
+        ((s->pad_level >> sel0) & 1) == !!(s->ext_wakeup_conf & EXT_WAKEUP0_LV)) {
+        cause |= WAKE_EXT0;
+    }
+    if ((ena & WAKE_EXT1) && *ext1_pads) {
+        cause |= WAKE_EXT1;
+    }
+    return cause;
+}
+
+/* Deep sleep ends in a reset: the ROM boots again and reports DEEPSLEEP_RESET plus the cause. */
+static void esp32s3_rtc_deep_wake(Esp32s3RtcCntlState *s, uint32_t cause, uint32_t ext1_pads)
+{
+    if (!s->sleeping) {
+        return;
+    }
+    s->sleeping = false;
+    timer_del(&s->sleep_timer);
+    timer_del(&s->deep_timer);
+    /* The RTC counter kept running while the VM (and the virtual clock) was suspended. */
+    s->time_base_ns -= qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s->deep_start_rt_ns;
+    /*
+     * The SoC reset doesn't reach this device (the RTC domain keeps its
+     * registers and counter), so end the sleep state here.
+     */
+    s->state0_reg &= ~STATE0_SLEEP_EN;
+    s->int_raw = 0;
+    s->wakeup_cause = cause;
+    s->ext_wakeup1_status = (cause & WAKE_EXT1) ? ext1_pads : 0;
+    s->reset_cause[0] = ESP32_DEEPSLEEP_RESET;
+    s->reset_cause[1] = ESP32_DEEPSLEEP_RESET;
+    qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
+    qemu_irq_pulse(s->dig_reset_req);
+}
+
+static void esp32s3_rtc_deep_timer_cb(void *opaque)
+{
+    esp32s3_rtc_deep_wake(opaque, WAKE_TIMER, 0);
+}
+
+static void esp32s3_rtc_start_deep_sleep(Esp32s3RtcCntlState *s)
+{
+    uint32_t ext1_pads, cause = esp32s3_rtc_pads_awake(s, &ext1_pads);
+
+    s->sleeping = true;
+    s->deep_start_rt_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (cause) {
+        esp32s3_rtc_deep_wake(s, cause, ext1_pads);
+        return;
+    }
+    if ((esp32s3_rtc_wake_ena(s) & WAKE_TIMER) && (s->slp_timer[1] & SLP_TIMER1_ALARM_EN)) {
+        uint64_t target = s->slp_timer[0] | ((uint64_t)(s->slp_timer[1] & 0xffff) << 32);
+        int64_t left = s->time_base_ns + muldiv64(target, NANOSECONDS_PER_SECOND, s->rtc_slowclk_freq)
+                       - qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        /* Too short to bother suspending (and racing the suspend request). */
+        if (left < SCALE_MS) {
+            esp32s3_rtc_deep_wake(s, WAKE_TIMER, 0);
+            return;
+        }
+        /* shortcut: the sleep lasts its length in host time, not scaled to the icount rate */
+        timer_mod_ns(&s->deep_timer, s->deep_start_rt_ns + left);
+    }
+    /*
+     * The digital core is off: suspend the VM so the virtual clock stops and
+     * no watchdog bites the CPU spinning on INT_RAW. A pad or the deep timer
+     * resumes it into the reset. No wake source = asleep until a reset (EN).
+     */
+    qemu_system_suspend_request();
+}
+
+static void esp32s3_rtc_set_pad(void *opaque, int n, int level)
+{
+    Esp32s3RtcCntlState *s = opaque;
+    uint32_t ext1_pads, cause;
+
+    s->pad_level = (s->pad_level & ~BIT(n)) | (level ? BIT(n) : 0);
+    if (s->sleeping && (s->dig_pwc & DG_WRAP_PD_EN)) {
+        cause = esp32s3_rtc_pads_awake(s, &ext1_pads);
+        if (cause) {
+            esp32s3_rtc_deep_wake(s, cause, ext1_pads);
+        }
+    }
+}
+
+static uint64_t esp32s3_rtcio_ext0_read(void *opaque, hwaddr addr, unsigned int size)
+{
+    return ((Esp32s3RtcCntlState *)opaque)->ext0_reg;
+}
+
+static void esp32s3_rtcio_ext0_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
+{
+    ((Esp32s3RtcCntlState *)opaque)->ext0_reg = value;
+}
+
+static const MemoryRegionOps esp32s3_rtcio_ext0_ops = {
+    .read = esp32s3_rtcio_ext0_read,
+    .write = esp32s3_rtcio_ext0_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
 
 static void esp32s3_rtc_wake(Esp32s3RtcCntlState *s, uint32_t cause)
 {
@@ -68,6 +203,10 @@ static void esp32s3_rtc_sleep_timer_cb(void *opaque)
 /* Light sleep: the CPU spins on INT_RAW until a wake source fires. */
 static void esp32s3_rtc_start_sleep(Esp32s3RtcCntlState *s)
 {
+    if (s->dig_pwc & DG_WRAP_PD_EN) {
+        esp32s3_rtc_start_deep_sleep(s);
+        return;
+    }
     uint32_t ena = (s->wakeup_state_reg >> 15) & 0x1ffff;
     bool timer = (ena & WAKE_TIMER) && (s->slp_timer[1] & SLP_TIMER1_ALARM_EN);
 
@@ -103,7 +242,7 @@ static void esp32s3_rtc_set_gpio_wake(void *opaque, int n, int level)
 {
     Esp32s3RtcCntlState *s = opaque;
     s->gpio_wake = level != 0;
-    if (s->gpio_wake && s->sleeping && (((s->wakeup_state_reg >> 15) & 0x1ffff) & WAKE_GPIO)) {
+    if (s->gpio_wake && s->sleeping && !(s->dig_pwc & DG_WRAP_PD_EN) && (((s->wakeup_state_reg >> 15) & 0x1ffff) & WAKE_GPIO)) {
         esp32s3_rtc_wake(s, WAKE_GPIO);
     }
 }
@@ -121,6 +260,10 @@ static uint64_t esp32s3_rtc_cntl_read(void *opaque, hwaddr addr, unsigned int si
     case R_INT_RAW:          r = s->int_raw; break;
     case R_INT_ST:           r = s->int_raw & s->int_ena; break;
     case R_SLP_WAKEUP_CAUSE: r = s->wakeup_cause; break;
+    case R_EXT_WAKEUP_CONF:  r = s->ext_wakeup_conf; break;
+    case R_DIG_PWC:          r = s->dig_pwc; break;
+    case R_EXT_WAKEUP1:      r = s->ext_wakeup1; break;
+    case R_EXT_WAKEUP1_STATUS: r = s->ext_wakeup1_status; break;
     case A_RTC_CNTL_OPTIONS0:
         r = s->options0_reg;
         break;
@@ -176,6 +319,14 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
     case R_SLP_TIMER0:   s->slp_timer[0] = value; break;
     case R_SLP_TIMER1:   s->slp_timer[1] = value; break;
     case R_WAKEUP_STATE: s->wakeup_state_reg = value; break;
+    case R_EXT_WAKEUP_CONF: s->ext_wakeup_conf = value; break;
+    case R_DIG_PWC:      s->dig_pwc = value; break;
+    case R_EXT_WAKEUP1:
+        s->ext_wakeup1 = value & EXT_WAKEUP1_SEL;
+        if (value & EXT_WAKEUP1_STATUS_CLR) {
+            s->ext_wakeup1_status = 0;
+        }
+        break;
     case R_INT_ENA:
         s->int_ena = value;
         qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
@@ -295,6 +446,7 @@ static void esp32s3_rtc_cntl_reset_hold(Object *obj, ResetType type)
     s->int_raw = 0;
     s->state0_reg = 0;
     timer_del(&s->sleep_timer);
+    timer_del(&s->deep_timer);
 }
 
 static void esp32s3_rtc_cntl_realize(DeviceState *dev, Error **errp)
@@ -316,6 +468,12 @@ static void esp32s3_rtc_cntl_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(sbd), &s->clk_update, ESP32S3_RTC_CLK_UPDATE_GPIO, 1);
     qdev_init_gpio_in_named(DEVICE(sbd), esp32s3_rtc_set_gpio_wake, ESP32S3_RTC_GPIO_WAKE, 1);
     timer_init_ns(&s->sleep_timer, QEMU_CLOCK_VIRTUAL, esp32s3_rtc_sleep_timer_cb, s);
+    qdev_init_gpio_in_named(DEVICE(sbd), esp32s3_rtc_set_pad, ESP32S3_RTC_PAD, ESP32S3_RTC_PAD_COUNT);
+    memory_region_init_io(&s->rtcio_ext0, obj, &esp32s3_rtcio_ext0_ops, s, "esp32s3.rtcio.ext_wakeup0", 4);
+    sysbus_init_mmio(sbd, &s->rtcio_ext0);
+    timer_init_ns(&s->deep_timer, QEMU_CLOCK_REALTIME, esp32s3_rtc_deep_timer_cb, s);
+    qemu_system_wakeup_enable(QEMU_WAKEUP_REASON_OTHER, true);
+    s->pad_level = PADS_ALL;
 
     for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
         s->reset_cause[i] = ESP32_POWERON_RESET;
