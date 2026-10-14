@@ -70,7 +70,8 @@ x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png \
 | Battery | CW2017 fuel gauge on I2C | done |
 | Wi-Fi | emulated MAC + a fake open AP (`PICSimLabWifi`), bridged to the host network | done |
 | Light sleep | RTC timer and GPIO wake | done |
-| Frontlight, charger STAT, deep sleep, USB OTG | | not yet |
+| Deep sleep | ext0, ext1 (Power, Up, Down) and RTC timer wake, reset through the ROM with the wake cause | done |
+| Frontlight, charger STAT, USB OTG | | not yet |
 
 The **X3** (`-machine x3`, `qemu-system-riscv32`): UC8279d or UC8253 792x528
 e-ink, SD card in SPI mode, the six keys on their ADC ladder plus Power,

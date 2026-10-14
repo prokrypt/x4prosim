@@ -412,6 +412,8 @@ static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
 
     qdev_realize(DEVICE(&s->rtc_cntl), &s->rtc_bus, &error_fatal);
     esp32s3_soc_add_periph_device(sys_mem, &s->rtc_cntl, DR_REG_RTCCNTL_BASE);
+    memory_region_add_subregion_overlap(sys_mem, DR_REG_RTCIO_BASE + ESP32S3_RTCIO_EXT_WAKEUP0_OFFSET,
+                                        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->rtc_cntl), 1), 1);
 
     qdev_connect_gpio_out_named(DEVICE(&s->rtc_cntl), ESP32S3_RTC_DIG_RESET_GPIO, 0,
                                 qdev_get_gpio_in_named(dev, ESP32S3_RTC_DIG_RESET_GPIO, 0));
@@ -789,6 +791,10 @@ static void esp32s3_machine_init(MachineState *machine)
                            qdev_get_gpio_in(intmatrix_dev, ETS_GPIO_INTR_SOURCE));
         qdev_connect_gpio_out_named(DEVICE(&ss->gpio), ESP32S3_GPIO_WAKE, 0,
                                     qdev_get_gpio_in_named(DEVICE(&ss->rtc_cntl), ESP32S3_RTC_GPIO_WAKE, 0));
+        for (int i = 0; i < ESP32S3_GPIO_RTC_PAD_COUNT; i++) {
+            qdev_connect_gpio_out_named(DEVICE(&ss->gpio), ESP32S3_GPIO_RTC_PAD, i,
+                                        qdev_get_gpio_in_named(DEVICE(&ss->rtc_cntl), ESP32S3_RTC_PAD, i));
+        }
     }
 
     {

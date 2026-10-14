@@ -153,6 +153,15 @@ Done on `x4prosim`:
 - `hw/misc/esp32s3_rtc_cntl.c`: light sleep: `SLEEP_EN` waits for the RTC timer
   alarm or a GPIO wake, and hides the sleep from the RTC counter so esp_timer
   isn't advanced twice.
+- Deep sleep (same file): `SLEEP_EN` with `DIG_PWC` DG_WRAP_PD_EN suspends the VM
+  until ext0 (RTC_IO EXT_WAKEUP0 pad at EXT_WAKEUP0_LV), ext1 (any EXT_WAKEUP1
+  pad high/low) or the RTC timer, then resets with reason DEEPSLEEP: the ROM boots
+  again, `SLP_WAKEUP_CAUSE` and `EXT_WAKEUP1_STATUS` give the cause and pads. The
+  GPIO model feeds GPIO0..21 to it on `rtc-pad` lines. RTC memory, the RTC counter
+  (advanced by the time asleep) and the wake registers survive the reset. A timer
+  wake sleeps its length in host time. `info status` shows `paused (suspended)`
+  while asleep. Checked with CrossDink 1014a: Power sleeps, a short press wakes
+  and re-sleeps, a held press boots to Home with `reset=DEEPSLEEP wake=EXT1`.
 - SD card: `x4prosim/mksd.py` makes an MBR + FAT32 image (SdFat needs the MBR);
   the existing `dwc_sdmmc` model mounts it.
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
@@ -178,7 +187,7 @@ Done on `x4prosim`:
 
 Still missing: LEDC frontlight, charger STAT (GPIO21 reads 1 = charging), real Wi-Fi
 (WPA, signal, other APs),
-deep sleep with ext0/ext1 wake, USB OTG.
+USB OTG.
 
 Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
 - GPSPI: DMA transfers (IDF `spi_master` uses DMA above 64 bytes), hardware CS,
@@ -335,7 +344,7 @@ Notes:
 | Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | open |
 | Charger | STAT GPIO21, active-HIGH = charging | GPIO | open |
 | Wi-Fi | MAC + fake open AP bridged to a QEMU NIC: NAT (`-nic user`, hostfwd) or LAN (`X4BR=br0`) | n/a | done |
-| Sleep | deep sleep + ext0/ext1 GPIO wake, RTC_NOINIT/RTC_DATA memory | RTC_CNTL | open (later) |
+| Sleep | deep sleep + ext0/ext1 GPIO wake, RTC_NOINIT/RTC_DATA memory | RTC_CNTL | done |
 
 ## Helper agent task: GPSPI2 DMA + hardware CS (current)
 
