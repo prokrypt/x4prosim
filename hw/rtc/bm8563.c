@@ -125,6 +125,15 @@ static int bm8563_send(I2CSlave *i2c, uint8_t data)
     return 0;
 }
 
+/* qom-set /machine/bm8563 offset <seconds from host time> sets the clock without NTP. */
+static void bm8563_instance_init(Object *obj)
+{
+    BM8563State *s = BM8563(obj);
+
+    QEMU_BUILD_BUG_ON(sizeof(s->offset) != sizeof(uint64_t));
+    object_property_add_uint64_ptr(obj, "offset", (uint64_t *)&s->offset, OBJ_PROP_FLAG_READWRITE);
+}
+
 static void bm8563_class_init(ObjectClass *klass, void *data)
 {
     I2CSlaveClass *sc = I2C_SLAVE_CLASS(klass);
@@ -138,6 +147,7 @@ static const TypeInfo bm8563_info = {
     .name = TYPE_BM8563,
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(BM8563State),
+    .instance_init = bm8563_instance_init,
     .class_init = bm8563_class_init,
 };
 
