@@ -149,6 +149,9 @@ static int match_mac_address(uint8_t *a1,uint8_t *a2) {
 // frame from ap to esp32
 void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int signal_strength) {    
     if(s->dma_inlink_address==0) return;
+    // Bit 31 of DMA_IN_STATUS is RX DMA enable: esp_wifi_stop() clears it and
+    // then frees the descriptor ring, so DMA past that point corrupts the heap.
+    if(!(s->mem[R_S3_WIFI_DMA_IN_STATUS] & 0x80000000)) return;
     uint8_t *header=malloc(sizeof(wifi_pkt_rx_ctrl_c3_t)+length);
     memset(header,0,sizeof(wifi_pkt_rx_ctrl_c3_t)+length);
     wifi_pkt_rx_ctrl_c3_t *pkt=(wifi_pkt_rx_ctrl_c3_t *)header;
@@ -179,6 +182,11 @@ void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int si
     // do a DMA transfer from the hardware to esp32 memory
     dma_list_item item;
     address_space_read(&address_space_memory, s->dma_inlink_ptr, MEMTXATTRS_UNSPECIFIED, &item, 12);
+    // Real hardware never writes a descriptor software owns, or past its buffer.
+    if(!item.owner || length > item.size) {
+        free(header);
+        return;
+    }
     address_space_write(&address_space_memory, item.address, MEMTXATTRS_UNSPECIFIED, header, length);
     item.length=length;
     item.eof=1;
