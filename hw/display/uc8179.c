@@ -61,6 +61,7 @@
 #include "hw/qdev-properties.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
+#include "trace.h"
 
 #define TYPE_UC8179 "uc8179"
 OBJECT_DECLARE_SIMPLE_TYPE(Uc8179State, UC8179)
@@ -313,6 +314,7 @@ static void uc8179_run_frame(Uc8179State *s, int f)
     float t = s->anim_t0 + f * dt;
     const float *e = s->frames[f];
     bool edges = bloom && (e[0] != e[1] || e[0] != e[2] || e[0] != e[3]);
+    double white = 0;
 
     for (int y = 0; y < H; y++) {
         const uint8_t *c = s->cls[y];
@@ -338,9 +340,12 @@ static void uc8179_run_frame(Uc8179State *s, int f)
             if (driven) {
                 k->t_drive = t;
             }
+            white += MIN(1.0f, MAX(0.0f, k->p));
         }
     }
     s->redraw = true;
+    /* Panel mean (0 black .. 10000 white) at the frame's end, for light/panel timelines. */
+    trace_uc8179_frame((int64_t)((t + dt) * 1e6), f, lround(white * 1e4 / (W * H)));
 }
 
 /* Runs the frames due by virtual time "now" (all of them if now < 0). */
@@ -385,6 +390,14 @@ static uint32_t uc8179_refresh(Uc8179State *s)
     s->anim_n = s->psr & PSR_REG ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
     s->anim_f = 0;
     s->anim_t0 = now;
+    if (trace_event_get_state_backends(TRACE_UC8179_FRAME)) {
+        double white = 0;
+        for (int i = 0; i < W * H; i++) {
+            white += MIN(1.0f, MAX(0.0f, s->ink[i].p));
+        }
+        trace_uc8179_frame((int64_t)(now * 1e6), -1, lround(white * 1e4 / (W * H)));   /* frame -1: before */
+    }
+    trace_uc8179_refresh((int64_t)(now * 1e6), s->anim_n, !!(s->psr & PSR_REG), s->frame_us);
     if (s->cdi & CDI_N2OCP) {
         memcpy(s->ram[PLANE_OLD], s->ram[PLANE_NEW], sizeof(s->ram[PLANE_NEW]));
     }

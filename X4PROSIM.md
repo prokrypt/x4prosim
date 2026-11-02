@@ -164,6 +164,15 @@ Done on `x4prosim`:
   and re-sleeps, a held press boots to Home with `reset=DEEPSLEEP wake=EXT1`.
 - SD card: `x4prosim/mksd.py` makes an MBR + FAT32 image (SdFat needs the MBR);
   the existing `dwc_sdmmc` model mounts it.
+- `hw/misc/esp32s3_ledc.c`: LEDC register file; each channel's output (duty or
+  idle level) is latched on PARA_UP/DUTY_START and traced with the virtual time
+  (`esp32s3_ledc_duty`). `uc8179` traces each refresh frame's panel mean
+  (`uc8179_frame`, frame -1 = before the refresh). Flash duck check:
+  `QEMU_EXTRA="-d trace:esp32s3_ledc_duty,trace:uc8179_frame -D duck.trace" x4prosim/drive.py ...`,
+  then `x4prosim/duckmeasure.py duck.trace` prints, per flashing refresh, the light
+  at the dark start and over the dark window, lit ms, early and late ms. The OTP
+  (Half/Full) waveforms are stand-ins, so only their duck's presence is meaningful;
+  register-LUT refreshes (gray, DU paint) play their real frames.
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
@@ -185,7 +194,7 @@ Done on `x4prosim`:
   Station MAC: the NIC's `mac=` (default 52:54:00:12:34:56) is burned into efuse
   when no efuse file is given; give each sim on one LAN its own `mac=`.
 
-Still missing: LEDC frontlight, charger STAT (GPIO21 reads 1 = charging), real Wi-Fi
+Still missing: charger STAT (GPIO21 reads 1 = charging), real Wi-Fi
 (WPA, signal, other APs),
 USB OTG.
 
@@ -341,7 +350,7 @@ Notes:
 | Touch | **GT911** at 0x5D (alt 0x14), INT 10, RST 4, power-enable GPIO2 active-LOW; reports X 0..480, Y 0..800 (portrait, firmware swaps XY and flips Y); has a capacitive Home key | on I2C | done |
 | RTC | **BM8563** (PCF8563-compatible) at 0x51; start date from `-rtc base=`, moved at runtime by `qom-set /machine/bm8563 offset <seconds from host time>` (sets the clock like NTP would) | on I2C | done |
 | Fuel gauge | **CW2017** at 0x63 | on I2C | done |
-| Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | open |
+| Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | duty traced (`hw/misc/esp32s3_ledc.c`), no light in the window |
 | Charger | STAT GPIO21, active-HIGH = charging | GPIO | open |
 | Wi-Fi | MAC + fake open AP bridged to a QEMU NIC: NAT (`-nic user`, hostfwd) or LAN (`X4BR=br0`) | n/a | done |
 | Sleep | deep sleep + ext0/ext1 GPIO wake, RTC_NOINIT/RTC_DATA memory | RTC_CNTL | done |
