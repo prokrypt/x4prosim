@@ -138,6 +138,8 @@ struct Uc8179State {
     Uc8179Ink *ink;         /* H x W */
     uint8_t cls[H][W];      /* OLD << 1 | NEW of the current refresh */
     float (*frames)[4];     /* drive per class, + toward white */
+    float *dcl;             /* per pixel: net register-LUT drive in frames (DC ledger) */
+    bool lut_refresh;       /* the refresh playing runs the register LUTs */
     double t_refresh;       /* virtual seconds at the end of the last refresh */
     double t_drift;         /* drift applied up to here */
     uint8_t shade[SHADES + 1];
@@ -321,6 +323,9 @@ static void uc8179_run_frame(Uc8179State *s, int f)
         for (int x = 0; x < W; x++) {
             Uc8179Ink *k = &s->ink[y * W + x];
             float d = e[c[x]];
+            if (s->lut_refresh) {
+                s->dcl[y * W + x] += d;
+            }
             bool driven = fabsf(d) >= 0.5f;
             if (edges && driven) {
                 float nb = 0;
@@ -353,11 +358,19 @@ static void uc8179_run_frames(Uc8179State *s, double now)
 {
     double dt = s->frame_us / 1e6;
     int due = now < 0 ? s->anim_n : MIN(s->anim_n, (int)((now - s->anim_t0) / dt + 1e-6));
+    bool ran = s->anim_f < due;
 
     while (s->anim_f < due) {
         uc8179_run_frame(s, s->anim_f++);
     }
     if (s->anim_f == s->anim_n) {
+        if (ran && s->lut_refresh && trace_event_get_state_backends(TRACE_UC8179_DC)) {
+            float worst = 0;
+            for (int i = 0; i < W * H; i++) {
+                worst = MAX(worst, fabsf(s->dcl[i]));
+            }
+            trace_uc8179_dc((int64_t)((s->anim_t0 + s->anim_n * dt) * 1e6), lroundf(worst));
+        }
         timer_del(&s->anim_timer);
         s->t_refresh = s->t_drift = s->anim_t0 + s->anim_n * dt;
     } else {
@@ -387,7 +400,26 @@ static uint32_t uc8179_refresh(Uc8179State *s)
             s->cls[y][x] = o << 1 | nw;
         }
     }
-    s->anim_n = s->psr & PSR_REG ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
+    s->lut_refresh = s->psr & PSR_REG;
+    s->anim_n = s->lut_refresh ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
+    if (s->lut_refresh) {
+        /*
+         * DC balance of the LUT set: a held pixel (KK, WW) must net zero and a
+         * black -> white drive must cancel a white -> black one (KW + WK).
+         */
+        float sum[4] = { 0 };
+        for (int n = 0; n < s->anim_n; n++) {
+            for (int k = 0; k < 4; k++) {
+                sum[k] += s->frames[n][k];
+            }
+        }
+        trace_uc8179_lut_dc((int64_t)(now * 1e6), s->anim_n, lroundf(sum[0]), lroundf(sum[1]),
+                            lroundf(sum[2]), lroundf(sum[3]));
+        if (sum[0] || sum[3] || sum[1] + sum[2]) {
+            qemu_log_mask(LOG_GUEST_ERROR, "uc8179: DC-unbalanced LUT: KK %g KW %g WK %g WW %g over %d frames\n",
+                          sum[0], sum[1], sum[2], sum[3], s->anim_n);
+        }
+    }
     s->anim_f = 0;
     s->anim_t0 = now;
     if (trace_event_get_state_backends(TRACE_UC8179_FRAME)) {
@@ -657,6 +689,7 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
         s->ink[i].p = 1;
     }
     s->frames = g_malloc(MAX_FRAMES * sizeof(*s->frames));
+    s->dcl = g_new0(float, H * W);
     /* position -> L* (linear) -> sRGB */
     for (int i = 0; i <= SHADES; i++) {
         float l = L_BLACK + (L_WHITE - L_BLACK) * i / SHADES;
