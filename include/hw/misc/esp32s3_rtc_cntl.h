@@ -12,6 +12,7 @@
 
 #include "hw/hw.h"
 #include "hw/sysbus.h"
+#include "hw/core/cpu.h"
 #include "qemu/timer.h"
 #include "hw/registerfields.h"
 #include "hw/misc/esp32s3_reg.h"
@@ -94,6 +95,8 @@ typedef struct Esp32s3RtcCntlState {
     uint32_t int_raw;
     uint32_t wakeup_cause;
     bool sleeping;
+    CPUState *sleep_cpu;    /* core halted while it spins on INT_RAW in light sleep */
+    uint32_t sleep_cause;   /* cause the pending light-sleep wake reports */
     int64_t sleep_start_ns;
     bool gpio_wake;
     QEMUTimer sleep_timer;

@@ -52,6 +52,7 @@ static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
 #define WAKE_GPIO           BIT(2)
 #define WAKE_TIMER          BIT(3)
 #define LIGHT_SLEEP_EARLY_NS (5 * SCALE_MS)
+#define LIGHT_SLEEP_MIN_NS   (1 * SCALE_MS)
 #define DG_WRAP_PD_EN       BIT(31)
 #define EXT_WAKEUP0_LV      BIT(30)
 #define EXT_WAKEUP1_LV      BIT(31)
@@ -183,6 +184,11 @@ static void esp32s3_rtc_wake(Esp32s3RtcCntlState *s, uint32_t cause)
     }
     s->sleeping = false;
     timer_del(&s->sleep_timer);
+    if (s->sleep_cpu) {
+        s->sleep_cpu->halted = 0;
+        qemu_cpu_kick(s->sleep_cpu);
+        s->sleep_cpu = NULL;
+    }
     /*
      * The systimer (esp_timer) keeps counting in QEMU while the guest "sleeps",
      * but IDF also advances it by the RTC-measured sleep time. Hide the sleep
@@ -197,10 +203,25 @@ static void esp32s3_rtc_wake(Esp32s3RtcCntlState *s, uint32_t cause)
 
 static void esp32s3_rtc_sleep_timer_cb(void *opaque)
 {
-    esp32s3_rtc_wake(opaque, WAKE_TIMER);
+    Esp32s3RtcCntlState *s = opaque;
+    esp32s3_rtc_wake(s, s->sleep_cause);
 }
 
-/* Light sleep: the CPU spins on INT_RAW until a wake source fires. */
+/*
+ * End the light sleep at ns, but never within LIGHT_SLEEP_MIN_NS (one FreeRTOS
+ * tick) of its start. A sleep that returns at once (zero ticks slept) makes
+ * esp_pm's idle task retry it immediately, and each attempt's IPC stall of
+ * the other core keeps that core's tick ISR from running: FreeRTOS time
+ * freezes for as long as the wake source stays active (a held key). Silicon
+ * pays ~100 us per attempt and its tick keeps coming.
+ */
+static void esp32s3_rtc_wake_at(Esp32s3RtcCntlState *s, uint32_t cause, int64_t ns)
+{
+    s->sleep_cause = cause;
+    timer_mod_ns(&s->sleep_timer, MAX(ns, s->sleep_start_ns + LIGHT_SLEEP_MIN_NS));
+}
+
+/* Light sleep: the CPU halts on its INT_RAW spin until a wake source fires. */
 static void esp32s3_rtc_start_sleep(Esp32s3RtcCntlState *s)
 {
     if (s->dig_pwc & DG_WRAP_PD_EN) {
@@ -209,27 +230,24 @@ static void esp32s3_rtc_start_sleep(Esp32s3RtcCntlState *s)
     }
     uint32_t ena = (s->wakeup_state_reg >> 15) & 0x1ffff;
     bool timer = (ena & WAKE_TIMER) && (s->slp_timer[1] & SLP_TIMER1_ALARM_EN);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     s->sleeping = true;
-    s->sleep_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->sleep_start_ns = now;
     if ((ena & WAKE_GPIO) && s->gpio_wake) {
-        esp32s3_rtc_wake(s, WAKE_GPIO);
+        esp32s3_rtc_wake_at(s, WAKE_GPIO, now);
         return;
     }
     if (timer) {
         uint64_t target = s->slp_timer[0] | ((uint64_t)(s->slp_timer[1] & 0xffff) << 32);
+        int64_t target_ns = s->time_base_ns + muldiv64(target, NANOSECONDS_PER_SECOND, s->rtc_slowclk_freq);
         /*
          * Wake a little early: TCG runs the sleep entry/exit code slower than
          * silicon, and FreeRTOS asserts if the measured sleep overshoots the
-         * idle time it planned (vTaskStepTick).
+         * idle time it planned (vTaskStepTick). A short alarm is cut to half
+         * its length rather than to nothing.
          */
-        int64_t ns = s->time_base_ns + muldiv64(target, NANOSECONDS_PER_SECOND, s->rtc_slowclk_freq)
-                     - LIGHT_SLEEP_EARLY_NS;
-        if (ns > qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)) {
-            timer_mod_ns(&s->sleep_timer, ns);
-            return;
-        }
-        esp32s3_rtc_wake(s, WAKE_TIMER);
+        esp32s3_rtc_wake_at(s, WAKE_TIMER, MAX(target_ns - LIGHT_SLEEP_EARLY_NS, now + (target_ns - now) / 2));
         return;
     }
     if (!(ena & WAKE_GPIO)) {
@@ -243,7 +261,7 @@ static void esp32s3_rtc_set_gpio_wake(void *opaque, int n, int level)
     Esp32s3RtcCntlState *s = opaque;
     s->gpio_wake = level != 0;
     if (s->gpio_wake && s->sleeping && !(s->dig_pwc & DG_WRAP_PD_EN) && (((s->wakeup_state_reg >> 15) & 0x1ffff) & WAKE_GPIO)) {
-        esp32s3_rtc_wake(s, WAKE_GPIO);
+        esp32s3_rtc_wake_at(s, WAKE_GPIO, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
 }
 
@@ -257,7 +275,19 @@ static uint64_t esp32s3_rtc_cntl_read(void *opaque, hwaddr addr, unsigned int si
     case R_STATE0:           r = s->state0_reg; break;
     case R_WAKEUP_STATE:     r = s->wakeup_state_reg; break;
     case R_INT_ENA:          r = s->int_ena; break;
-    case R_INT_RAW:          r = s->int_raw; break;
+    case R_INT_RAW:
+        r = s->int_raw;
+        /*
+         * rtc_sleep_start spins here until the wake: silicon clock-gates the
+         * core, and under icount the MMIO spin is recompiled every iteration
+         * (minutes of host time per second of sleep). Halt the core instead;
+         * the wake un-halts it and the re-read returns the wake bit.
+         */
+        if (s->sleeping && !(r & INT_SLP_WAKEUP) && !(s->dig_pwc & DG_WRAP_PD_EN) && current_cpu && !s->sleep_cpu) {
+            s->sleep_cpu = current_cpu;
+            cpu_interrupt(current_cpu, 0x0020);  /* CPU_INTERRUPT_HALT, poisoned in common code */
+        }
+        break;
     case R_INT_ST:           r = s->int_raw & s->int_ena; break;
     case R_SLP_WAKEUP_CAUSE: r = s->wakeup_cause; break;
     case R_EXT_WAKEUP_CONF:  r = s->ext_wakeup_conf; break;
@@ -443,6 +473,7 @@ static void esp32s3_rtc_cntl_reset_hold(Object *obj, ResetType type)
 
     s->time_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->sleeping = false;
+    s->sleep_cpu = NULL;
     s->int_raw = 0;
     s->state0_reg = 0;
     timer_del(&s->sleep_timer);
