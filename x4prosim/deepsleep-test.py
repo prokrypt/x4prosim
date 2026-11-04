@@ -22,14 +22,14 @@ TRACE = f"/tmp/x4prosim-deepsleep-{os.getpid()}.trace"
 
 
 class QTest:
-    def __init__(self):
+    def __init__(self, *extra):
         sock = f"/tmp/x4prosim-qtest-{os.getpid()}.sock"
         srv = socket.socket(socket.AF_UNIX)
         srv.bind(sock)
         srv.listen(1)
         self.p = subprocess.Popen([qemu, "-machine", "x4pro", "-accel", "qtest", "-display", "none",
                                    "-qtest", f"unix:{sock}", "-qtest-log", "/dev/null", "-monitor", "none", "-serial", "null",
-                                   "-d", "trace:esp32s3_rtc_wake", "-D", TRACE],
+                                   "-d", "trace:esp32s3_rtc_wake", "-D", TRACE, *extra],
                                   stdout=subprocess.DEVNULL)
         self.s, _ = srv.accept()
         srv.close()
@@ -121,3 +121,19 @@ wakes = [l.split(" deep=")[1].split()[:2] for l in open(TRACE) if "esp32s3_rtc_w
 os.unlink(TRACE)
 assert wakes == [["0", "cause=0x8"], ["1", "cause=0x2"], ["1", "cause=0x1"], ["1", "cause=0x8"]], f"trace: wakes {wakes}"
 print("ok  wakes traced")
+
+# deep-timer-skip: a 10 min timer sleep wakes at once with the 10 min on the RTC counter.
+q = QTest("-global", "driver=misc.esp32s3.rtc_cntl,property=deep-timer-skip,value=true")
+try:
+    q.w(RTC + TIME_UPDATE, 1 << 31)
+    now = q.r(RTC + TIME0)
+    q.w(RTC + SLP_TIMER0, now + 600 * 150000)
+    q.w(RTC + SLP_TIMER1, 1 << 16)
+    sleep(q, TIMER)
+    check(q, "RTC timer, deep-timer-skip", TIMER)
+    q.w(RTC + TIME_UPDATE, 1 << 31)
+    assert q.r(RTC + TIME0) - now >= 600 * 150000, "skip: RTC counter didn't count the alarm"
+    print("ok  RTC counter advanced by the skipped sleep")
+finally:
+    q.close()
+    os.unlink(TRACE)
