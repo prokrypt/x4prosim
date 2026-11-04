@@ -168,6 +168,9 @@ Done on `x4prosim`:
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
 
+- GDMA (AES, SHA) uses the system address space, so guest DRAM and PSRAM addresses
+  resolve. It was rooted at the DRAM region (address 0 = 0x3FC80000), every transfer
+  failed, and AES-DMA left the guest spinning in `aes_hal_wait_done` on any HTTPS handshake.
 - Wi-Fi: the MAC is emulated with a fake AP bridged to a QEMU NIC (port of the
   lcgamboa ESP32-C3 model: `hw/misc/esp32s3_wifi.c`, `esp32_wifi_ap.c`,
   `esp32_wlan_packet.c`; analog/FE in `esp32s3_ana.c`, `esp32_fe.c`). `run.sh`
