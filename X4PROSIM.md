@@ -225,6 +225,7 @@ Done on `x4prosim`:
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+  The NIC is on by default (NAT, host :8080 -> device :80; `X4NET` overrides as in run.sh).
 - `x4prosim/sim.py`: scripted test runner. The USB-CDC console is a socket, so steps can
   send serial-remote commands (`cmd GOTO settings`, `cmd WAITIDLE 30000`; CrossDink
   debug builds) and wait for log lines (`waitlog Home 240`), besides `key`, `tap X,Y`,
