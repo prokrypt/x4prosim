@@ -146,6 +146,9 @@ Done on `x4prosim`:
 - X4 Pro uses `-icount shift=2` (set by `run.sh`/`drive.py`): guest time follows
   instructions, not host speed; without it FreeRTOS can assert after light sleep on a slow host.
   Guest runs slower than real time, so give `wait:` steps generous values.
+  `X4DET=1 x4prosim/drive.py ...` makes guest time independent of the host (`sleep=off`, RTC
+  fixed on the VM clock): CrossDink's `[BOOT] first ink` repeats to the ms run to run, a
+  regression tripwire for boot/book-open guest ms (not device ms: no flash/PSRAM cache cost).
 - `x4prosim/testdata/`: real device logs, the panel OTP dump, battery history to
   seed the SD card, estimated power numbers. See its README.
 - `hw/input/x4pro_keys.c`: Up/Down/Power keys (arrow keys + P, or
