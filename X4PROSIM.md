@@ -173,6 +173,11 @@ Done on `x4prosim`:
   at the dark start and over the dark window, lit ms, early and late ms. The OTP
   (Half/Full) waveforms are stand-ins, so only their duck's presence is meaningful;
   register-LUT refreshes (gray, DU paint) play their real frames.
+- Command stream parity: `-d trace:uc8179_cmd` logs every panel command with its
+  data length and first 8 data bytes. With a device log from firmware built with
+  `-DFREEINK_EPD_TRACE=1` (freeink-sdk EpdBus), `x4prosim/epdtrace.py device.log
+  sim.trace --from-cmd 0x00` prints both streams side by side and exits 1 at the
+  first command whose opcode or length differs.
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
