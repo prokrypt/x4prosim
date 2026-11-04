@@ -197,6 +197,43 @@ Done on `x4prosim`:
   Station MAC: the NIC's `mac=` (default 52:54:00:12:34:56) is burned into efuse
   when no efuse file is given; give each sim on one LAN its own `mac=`.
 
+### Board state (`qom-get /machine state`)
+
+One JSON object with what scripts and live views poll, so they don't parse traces.
+HMP `qom-get /machine state` prints it as a quoted string; QMP
+`{"execute":"qom-get","arguments":{"path":"/machine","property":"state"}}` returns
+it as the string `return`. Each device part is also on its own `state` property
+(`/machine/peripheral/panel`, `/machine/gt911`, `/machine/soc/ledc` for LEDC). Keys are only ever added.
+
+```json
+{"uptime_us":18906028,"sleep":"awake",
+ "panel":{"refreshes":2,"busy":false,"animating":false,"asleep":false,
+          "last":{"t_us":2031922,"frames":10,"wave":"otp-fast"}},
+ "touch":{"down":false,"x":0,"y":0,"home":false,"frames":0,"pending":false,"running":true},
+ "keys":{"up":false,"down":false,"power":false},
+ "ledc":[[0,1024],[0,1024],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+ "battery":{"soc":80,"mv":3950}}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `uptime_us` | virtual clock (guest time under `-icount`), µs; stops in deep sleep |
+| `sleep` | `awake`, `light` (SLEEP_EN, CPU halted) or `deep` (VM suspended) |
+| `panel.refreshes` | DRF (0x12) count since power-on; changes = new picture coming |
+| `panel.busy` | BUSY_N low (refresh, PON/POF, temperature sense) |
+| `panel.animating` | refresh frames still playing on the virtual clock |
+| `panel.asleep` | deep sleep command (DSLP 0xA5) until reset |
+| `panel.last` | last refresh: start `t_us`, `frames`, `wave` = `lut` (register LUTs), `otp-fast` (inside PTIN/PTOUT) or `otp-full` |
+| `touch.down/x/y/home` | live GT911 input (480x800 portrait coordinates) |
+| `touch.frames` | frames latched since power-on; `pending` = latched, not yet read and cleared by the firmware |
+| `touch.running` | GT911 powered and out of reset |
+| `keys` | Up/Down/Power held |
+| `ledc` | `[level, max]` per LEDC channel; X4 Pro frontlight = channel 0 (cool) and 1 (warm), percent = level*100/max |
+| `battery` | CW2017 `soc` (%) and `mv` (cell voltage), settable on `/machine/cw2017` |
+
+Wait for a picture: poll until `panel.refreshes` moves past the value before the
+input and `panel.busy` and `panel.animating` are both false.
+
 Still missing: charger STAT (GPIO21 reads 1 = charging), real Wi-Fi
 (WPA, signal, other APs),
 USB OTG.
