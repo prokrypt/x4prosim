@@ -233,6 +233,12 @@ Done on `x4prosim`:
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+- `x4prosim/ota.py otadata flash.bin`: OTA slots, both otadata entries and the slot the
+  bootloader picks. `x4prosim/ota.py test flash.bin app.bin`: Wi-Fi OTA end to end on a
+  debug build (`/api/ota`): seeds wifi.json + `/debug/remote-token`, POSTs the app through a
+  hostfwd, checks the reply, otadata and the next boot's slot, then a corrupted new slot
+  (must fall back after a software reset; power-on skips validation by CrossDink's sdkconfig)
+  and a PENDING_VERIFY slot (reports whether the bootloader rolls back). ~6 min.
 - `x4prosim/sim.py`: scripted test runner. The USB-CDC console is a socket, so steps can
   send serial-remote commands (`cmd GOTO settings`, `cmd WAITIDLE 30000`; CrossDink
   debug builds) and wait for log lines (`waitlog Home 240`), besides `key`, `tap X,Y`,
