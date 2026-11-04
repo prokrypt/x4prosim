@@ -127,6 +127,10 @@ Done on `x4prosim`:
     fitted to device photos: a typed-then-deleted word leaves ~11% ghost (device
     ~11%) that fades x0.53 over 6 fast refreshes (device x0.51); menus and gray
     book pages come out clean.
+  - PON/POF hold BUSY for `pon-ms`/`pof-ms` (127/82, the device's waits). TSC
+    (0x40) reads `temperature` (25 C; `qom-set /machine/peripheral/panel
+    temperature 10` at run time). Opcodes outside the UC8179 set count in
+    read-only `unknown-cmds` and log `LOG_UNIMP` (`-d unimp`).
   - Every parameter is `-global uc8179.<name>=N` and 0 turns that mechanism off:
     `swing-frames` 6, `rail-soft` 100, `otp-fast-frames` 10,
     `otp-hold-drive` 6, `remnant-fast`/`-ms` 30/1000, `remnant-slow`/`-ms`

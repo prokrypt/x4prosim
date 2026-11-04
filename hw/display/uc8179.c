@@ -7,7 +7,8 @@
  * bit-banged SCL/SDA edges on GPIO, which the firmware uses for its
  * controller probe and for register reads. Reads answer the identity the
  * real X4 Pro panel gives (REV 0x70 = 00 00 01 FF FF, FLG 0x71 = 0x13 idle),
- * a fixed 25 C temperature (0x40), and the OTP (0xA2) of that panel: its
+ * the "temperature" property (0x40; settable at run time with qom-set, to
+ * exercise the per-temperature-range VCOM/TSSET paths), and the OTP (0xA2) of that panel: its
  * bank 0 head and per-temperature-range headers (VCOM_DC) as dumped from the
  * device; the waveform bodies, which were not dumped, read as 0x00.
  *
@@ -43,8 +44,11 @@
  *    per mille, with time constant "drift-s" since it was last driven.
  * Shown lightness is linear in position (L* from black to white), which puts
  * the vendor gray LUT's levels at even steps.
- * Other commands (power, booster, PLL, VCOM, temperature setting) are
- * accepted and ignored.
+ * PON/POF hold BUSY_N low for "pon-ms"/"pof-ms" (defaults: the X4 Pro's
+ * measured waits). Other UC8179 commands (booster, PLL, VCOM, temperature
+ * setting) are accepted and ignored; an opcode outside the UC8179 set counts
+ * in "unknown-cmds" and logs LOG_UNIMP, and OTP programming (0xA0/0xA1) logs
+ * a guest error.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -53,6 +57,7 @@
 #include "qemu/osdep.h"
 #include <math.h>
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -99,6 +104,10 @@ struct Uc8179State {
     QEMUTimer busy_timer;
     QEMUTimer anim_timer;
     uint32_t busy_ms;       /* fixed DRF BUSY time; 0 = the frames' duration */
+    uint32_t pon_ms, pof_ms;    /* PON/POF BUSY time */
+    int8_t temperature;     /* TSC (0x40) reading, C */
+    uint8_t temp_rd[2];
+    uint32_t unknown_cmds;
     bool animate;
     int anim_f, anim_n;     /* next frame to run, frames in the refresh */
     double anim_t0;         /* virtual seconds the refresh started */
@@ -151,7 +160,13 @@ struct Uc8179State {
 };
 
 static const uint8_t uc8179_rev[] = { 0x00, 0x00, 0x01, 0xff, 0xff };
-static const uint8_t uc8179_temp[] = { 25, 0x00 };
+/* UC8179 command set (datasheet), plus 0x52 and 0xE1 from the OEM init. */
+static const uint8_t uc8179_known[] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x10, 0x11, 0x12, 0x13, 0x15, 0x17,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x2A, 0x2B, 0x30, 0x40, 0x41, 0x42, 0x43, 0x44,
+    0x50, 0x51, 0x52, 0x60, 0x61, 0x65, 0x70, 0x71, 0x80, 0x81, 0x82, 0x90, 0x91, 0x92,
+    0xA2, 0xE0, 0xE1, 0xE3, 0xE4, 0xE5,
+};
 
 /* OTP bank 0 as read from an X4 Pro panel: 0x000..0x01E, then TR headers at OTP_TR(n). */
 static const uint8_t uc8179_otp_head[] = {
@@ -452,10 +467,20 @@ static void uc8179_command(Uc8179State *s, uint8_t c)
     s->rd = NULL;
     s->rd_len = 0;
 
+    if (!memchr(uc8179_known, c, sizeof(uc8179_known)) && c != 0xA0 && c != 0xA1) {
+        s->unknown_cmds++;
+        qemu_log_mask(LOG_UNIMP, "uc8179: unknown command 0x%02x\n", c);
+    }
     switch (c) {
     case 0x02:  /* POF */
+        uc8179_set_busy(s, s->pof_ms);
+        break;
     case 0x04:  /* PON */
-        uc8179_set_busy(s, 2);
+        uc8179_set_busy(s, s->pon_ms);
+        break;
+    case 0xA0:  /* PGM */
+    case 0xA1:  /* APG */
+        qemu_log_mask(LOG_GUEST_ERROR, "uc8179: OTP program command 0x%02x\n", c);
         break;
     case 0x07:  /* DSLP; the check code 0xA5 follows as data */
         break;
@@ -472,8 +497,10 @@ static void uc8179_command(Uc8179State *s, uint8_t c)
         break;
     case 0x40:  /* TSC: BUSY while sensing, then the reading is clocked out */
         uc8179_set_busy(s, 5);
-        s->rd = uc8179_temp;
-        s->rd_len = sizeof(uc8179_temp);
+        s->temp_rd[0] = s->temperature;
+        s->temp_rd[1] = 0;
+        s->rd = s->temp_rd;
+        s->rd_len = sizeof(s->temp_rd);
         break;
     case 0x70:
         s->rd = uc8179_rev;
@@ -733,6 +760,9 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
 
 static Property uc8179_properties[] = {
     DEFINE_PROP_UINT32("busy-ms", Uc8179State, busy_ms, 0),
+    /* PON / POF "Wait complete" times in X4 Pro device logs */
+    DEFINE_PROP_UINT32("pon-ms", Uc8179State, pon_ms, 127),
+    DEFINE_PROP_UINT32("pof-ms", Uc8179State, pof_ms, 82),
     DEFINE_PROP_BOOL("animate", Uc8179State, animate, true),
     DEFINE_PROP_BOOL("portrait", Uc8179State, portrait, true),
     /* 6: the vendor gray LUT's black + 2 / + 4 white frames read 1/3 and 2/3 */
@@ -752,6 +782,36 @@ static Property uc8179_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+static void uc8179_get_temperature(Object *obj, Visitor *v, const char *name, void *opaque,
+                                   Error **errp)
+{
+    int32_t t = UC8179(obj)->temperature;
+    visit_type_int32(v, name, &t, errp);
+}
+
+static void uc8179_set_temperature(Object *obj, Visitor *v, const char *name, void *opaque,
+                                   Error **errp)
+{
+    int32_t t;
+
+    if (!visit_type_int32(v, name, &t, errp)) {
+        return;
+    }
+    if (t < INT8_MIN || t > INT8_MAX) {
+        error_setg(errp, "uc8179: temperature %d C out of range", t);
+        return;
+    }
+    UC8179(obj)->temperature = t;
+}
+
+static void uc8179_init(Object *obj)
+{
+    Uc8179State *s = UC8179(obj);
+
+    s->temperature = 25;
+    object_property_add_uint32_ptr(obj, "unknown-cmds", &s->unknown_cmds, OBJ_PROP_FLAG_READ);
+}
+
 static void uc8179_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -761,6 +821,8 @@ static void uc8179_class_init(ObjectClass *klass, void *data)
     k->transfer = uc8179_transfer;
     k->set_cs = uc8179_set_cs;
     k->cs_polarity = SSI_CS_LOW;
+    object_class_property_add(klass, "temperature", "int32", uc8179_get_temperature,
+                              uc8179_set_temperature, NULL, NULL);
     device_class_set_props(dc, uc8179_properties);
     object_class_property_add_str(klass, "state", uc8179_get_state, NULL);
 }
@@ -769,6 +831,7 @@ static const TypeInfo uc8179_info = {
     .name = TYPE_UC8179,
     .parent = TYPE_SSI_PERIPHERAL,
     .instance_size = sizeof(Uc8179State),
+    .instance_init = uc8179_init,
     .class_init = uc8179_class_init,
 };
 
