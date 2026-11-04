@@ -238,7 +238,8 @@ static void dwc_sdmmc_handle_cmd(DWCSDMMCState *s)
     request.cmd = hw_cmd.cmd_index;
     request.arg = s->cmdarg;
 
-    rlen = sdbus_do_command(&s->sdbus, &request, resp);
+    /* An unpowered card never answers: commands that expect a response time out. */
+    rlen = s->card_powered ? sdbus_do_command(&s->sdbus, &request, resp) : 0;
     /* Virtual ns: under -icount this is guest time, for SD profiling. */
     trace_dwc_sdmmc_command(request.cmd, request.arg, rlen, hw_cmd.data_expected, hw_cmd.rw,
                             s->bytcnt, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
@@ -339,7 +340,7 @@ static void dwc_sdmmc_handle_dma(DWCSDMMCState *s)
     bool is_write = hw_cmd.rw == 1;
     uint32_t bytes_done = 0;
 
-    if (s->bytcnt == 0 || s->blksiz == 0 ||
+    if (!s->card_powered || s->bytcnt == 0 || s->blksiz == 0 ||
         !FIELD_EX32(s->ctrl, SDMMC_CTRL, DMAEN)) {
         return;
     }
@@ -539,6 +540,20 @@ static const MemoryRegionOps dwc_sdmmc_ops = {
 
 
 
+/* "card-power" input: board power gate (X4 Pro GPIO5, active-LOW). Unwired = always powered. */
+static void dwc_sdmmc_set_card_power(void *opaque, int n, int level)
+{
+    DWCSDMMCState *s = DWC_SDMMC(opaque);
+    BusChild *kid = QTAILQ_FIRST(&BUS(&s->sdbus)->children);
+
+    trace_dwc_sdmmc_card_power(level, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    if (s->card_powered && !level && kid) {
+        /* Power loss: the card forgets its RCA, state and bus width; it needs CMD0 init again. */
+        device_cold_reset(kid->child);
+    }
+    s->card_powered = level;
+}
+
 static Property dwc_sdmmc_properties[] = {
         DEFINE_PROP_END_OF_LIST(),
 };
@@ -554,6 +569,8 @@ static void dwc_sdmmc_init(Object *obj)
                           TYPE_DWC_SDMMC, 4 * KiB);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq);
+    qdev_init_gpio_in_named(DEVICE(s), dwc_sdmmc_set_card_power, "card-power", 1);
+    s->card_powered = true;
 }
 
 static void dwc_sdmmc_reset(DeviceState *dev)

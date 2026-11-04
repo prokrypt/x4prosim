@@ -50,6 +50,7 @@ typedef struct DWCSDMMCState {
     uint32_t idsts;
 
     size_t bytes_left;
+    bool card_powered;      /* "card-power" input; a board line, so device reset keeps it */
     /* Config registers the model only stores (CLKDIV, CTYPE, TMOUT, FIFOTH, BMOD...). */
     uint32_t regs[0x120 / 4];
 

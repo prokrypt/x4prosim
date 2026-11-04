@@ -452,7 +452,7 @@ Notes:
 | Area | Hardware | Pins / bus | Owner |
 | --- | --- | --- | --- |
 | Display | UC8179 800x480 1-bit e-ink over GPSPI2, 10 MHz; SDA also read bit-banged | SCLK 12, SDA 11, CS 13, DC 18, RST 14, BUSY_N 6 | done |
-| SD | SDMMC slot 1, 1-bit, 40 MHz; GPIO5 = power enable, active-LOW | CLK 41, CMD 42, D0 40 | done |
+| SD | SDMMC slot 1, 1-bit, 40 MHz; GPIO5 = power enable, active-LOW (card answers only while LOW; HIGH resets it; trace `dwc_sdmmc_card_power`) | CLK 41, CMD 42, D0 40 | done |
 | Buttons | active-LOW, pull-up; Up 0 (strap), Down 7, Power 3 | GPIO | done |
 | **I2C bus** | **ESP32-S3 I2C0 controller, 400 kHz** | **SDA 39, SCL 38** | done |
 | Touch | **GT911** at 0x5D (alt 0x14), INT 10, RST 4, power-enable GPIO2 active-LOW; reports X 0..480, Y 0..800 (portrait, firmware swaps XY and flips Y); has a capacitive Home key | on I2C | done |

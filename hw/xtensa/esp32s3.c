@@ -1165,7 +1165,7 @@ static char *x4pro_get_state(Object *obj, Error **errp)
  * Up/Down/Power keys (GPIO 0/7/3), the charger STAT line (GPIO21, driven by
  * x4pro-keys "charging" so it no longer floats high), and on I2C0 (SDA 39, SCL 38) the GT911
  * touch (INT 10, RST 4, power enable GPIO2 active-low), BM8563 RTC and
- * CW2017 gauge.
+ * CW2017 gauge. The SD card (SDMMC) is powered only while GPIO5 is LOW.
  */
 static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
 {
@@ -1203,6 +1203,8 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 2,
                                 qemu_irq_invert(qdev_get_gpio_in_named(touch, "power", 0)));
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 4, qdev_get_gpio_in_named(touch, "rst", 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 5,
+                                qemu_irq_invert(qdev_get_gpio_in_named(DEVICE(&ss->sdmmc), "card-power", 0)));
     object_property_add_str(qdev_get_machine(), "state", x4pro_get_state, NULL);
 }
 
