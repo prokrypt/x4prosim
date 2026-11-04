@@ -56,6 +56,9 @@ typedef struct Esp32WifiState {
 
     uint8_t mode;  
 
+    /* x4prosim: frame counts for the "state" property (guest TX, delivered RX, RX dropped:
+     * no RX DMA, no descriptor, or one too small) */
+    uint64_t tx_frames, rx_frames, rx_dropped;
 } Esp32WifiState;
 
 #define Esp32_Mode_Station 0

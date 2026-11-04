@@ -31,6 +31,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "sysemu/blockdev.h"
 #include "sysemu/dma.h"
@@ -55,12 +56,6 @@
  * It is possible that Allwinner SD Host is based on an earlier version of Designware SD/MMC IP,
  * or is heavily inspired by it.
  */
-
-#ifdef DWC_SDMMC_DEBUG
-#define DEBUG(...) qemu_log(__VA_ARGS__)
-#else
-#define DEBUG(...)
-#endif
 
 typedef struct {
     uint32_t reserved1: 1;
@@ -226,7 +221,7 @@ static void dwc_sdmmc_update_irq(DWCSDMMCState *s)
         irq = s->rintsts & s->intmask;
         irq |= (s->idsts & s->idinten) << 16;
     }
-    DEBUG("%s: mask=0x%04x, sts=0x%04x irq=%d\n", __func__, s->intmask, s->rintsts, irq);
+    trace_dwc_sdmmc_update_irq(s->rintsts, s->idsts, irq);
     qemu_set_irq(s->irq, irq);
 }
 
@@ -235,7 +230,6 @@ static void dwc_sdmmc_handle_cmd(DWCSDMMCState *s)
     SDRequest request;
     uint8_t resp[16];
     int rlen;
-    DEBUG("%s: hw_cmd=0x%08x\n", __func__, s->cmd);
     sdmmc_hw_cmd_t hw_cmd = dwc_sdmmc_get_hw_cmd(s);
     if (hw_cmd.update_clk_reg) {
         goto done;
@@ -245,10 +239,11 @@ static void dwc_sdmmc_handle_cmd(DWCSDMMCState *s)
     request.arg = s->cmdarg;
 
     rlen = sdbus_do_command(&s->sdbus, &request, resp);
+    /* Virtual ns: under -icount this is guest time, for SD profiling. */
+    trace_dwc_sdmmc_command(request.cmd, request.arg, rlen, hw_cmd.data_expected, hw_cmd.rw,
+                            s->bytcnt, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     s->rintsts |= SDMMC_INTMASK_CMD_DONE;
-    if (rlen < 0) {
-        DEBUG("%s: error: rlen=%d\n", __func__, rlen);
-    } else {
+    if (rlen >= 0) {
         if (hw_cmd.response_expect) {
             if (rlen == 4 && !hw_cmd.response_long) {
                 s->resp[0] = ldl_be_p(&resp[0]);
@@ -267,7 +262,6 @@ static void dwc_sdmmc_handle_cmd(DWCSDMMCState *s)
     }
 
 done:
-    DEBUG("%s: ending with rinsts=0x%04x\n", __func__, s->rintsts);
     s->cmd = FIELD_DP32(s->cmd, SDMMC_CMD, START, 0);
     dwc_sdmmc_update_irq(s);
 }
@@ -279,9 +273,7 @@ static void dwc_sdmmc_update_bytes_left(DWCSDMMCState *s, size_t bytes_done)
     } else {
         s->bytes_left = 0;
     }
-    DEBUG("%s: bytes_left = %d\n", __func__, (unsigned) s->bytes_left);
     if (s->bytes_left == 0) {
-        DEBUG("%s: bytes_left = 0, setting SDMMC_INTMASK_DATA_OVER\n", __func__);
         s->rintsts |= SDMMC_INTMASK_DATA_OVER;
     }
 }
@@ -303,13 +295,13 @@ static size_t dwc_sdmmc_handle_one_desc(DWCSDMMCState *s, hwaddr desc_addr, sdmm
         return 0;
     }
 
+    trace_dwc_sdmmc_desc(desc_addr, desc->buffer1_ptr, num_bytes, is_write);
     while (num_done < num_bytes) {
         /* Try to completely fill the local buffer */
         uint32_t buf_bytes = num_bytes - num_done;
         if (buf_bytes > sizeof(buf)) {
             buf_bytes = sizeof(buf);
         }
-        DEBUG("%s: %sing %d bytes from descr 0x%08x\n", __func__, is_write?"write":"read", buf_bytes, (uint32_t) desc_addr);
         /* Write to SD bus */
         if (is_write) {
             dma_memory_read(&address_space_memory,
@@ -349,7 +341,6 @@ static void dwc_sdmmc_handle_dma(DWCSDMMCState *s)
 
     if (s->bytcnt == 0 || s->blksiz == 0 ||
         !FIELD_EX32(s->ctrl, SDMMC_CTRL, DMAEN)) {
-        DEBUG("%s: nothing to do (bytcnt=%d, blksiz=%d)\n", __func__, s->bytcnt, s->blksiz);
         return;
     }
 
@@ -358,7 +349,6 @@ static void dwc_sdmmc_handle_dma(DWCSDMMCState *s)
     }
 
     while (s->bytcnt > 0) {
-        DEBUG("%s: handling descriptor @0x%0x, bytcnt=%d\n", __func__, (uint32_t) desc_addr, s->bytcnt);
         bytes_done = dwc_sdmmc_handle_one_desc(s, desc_addr, &desc, is_write, s->bytcnt);
         dwc_sdmmc_update_bytes_left(s, bytes_done);
 
@@ -375,7 +365,6 @@ static void dwc_sdmmc_handle_dma(DWCSDMMCState *s)
             s->dscaddr = desc_addr;
         }
     }
-    DEBUG("%s: finished with bytcnt=%d at dscaddr=0x%08x\n", __func__, s->bytcnt, s->dscaddr);
 }
 
 static void dwc_sdmmc_maybe_autostop(DWCSDMMCState *s)
@@ -475,8 +464,18 @@ static void dwc_sdmmc_write(void *opaque, hwaddr offset,
             s->blksiz = value;
             break;
 
+        case A_SDMMC_BMOD:
+            /* SWR (bit 0) self-clears once the IDMAC reset is done, which here is at once. */
+            s->regs[offset / 4] = value & ~1u;
+            break;
+
         default:
-            qemu_log_mask(LOG_UNIMP, "%s: write@0x%02x value=0x%08x\n", __func__, (uint32_t) offset, (uint32_t) value);
+            /* Clock, bus width, timeout, FIFO and DMA config: no effect on the model, read back as written. */
+            if (offset < sizeof(s->regs)) {
+                s->regs[offset / 4] = value;
+            } else {
+                qemu_log_mask(LOG_UNIMP, "%s: write@0x%02x value=0x%08x\n", __func__, (uint32_t) offset, (uint32_t) value);
+            }
     }
 
 }
@@ -514,7 +513,14 @@ static uint64_t dwc_sdmmc_read(void *opaque, hwaddr offset,
             return s->dbaddr;
         case A_SDMMC_DSCADDR:
             return s->dscaddr;
+        case A_SDMMC_CDETECT:
+        case A_SDMMC_WRTPRT:
+            /* No CD/WP pin modelled: reads present/writable, as IDF routes const 0 for a slot without one (X4 Pro). No card -> commands time out. */
+            return 0;
         default:
+            if (offset < sizeof(s->regs)) {
+                return s->regs[offset / 4];
+            }
             qemu_log_mask(LOG_UNIMP, "%s: read@0x%02x\n", __func__, (uint32_t) offset);
     }
     return 0;
@@ -566,6 +572,7 @@ static void dwc_sdmmc_reset(DeviceState *dev)
     s->dbaddr = 0;
     s->pldmnd = 0;
     memset(s->resp, 0, sizeof(s->resp));
+    memset(s->regs, 0, sizeof(s->regs));
 }
 
 static void dwc_sdmmc_class_init(ObjectClass *klass, void *data)
