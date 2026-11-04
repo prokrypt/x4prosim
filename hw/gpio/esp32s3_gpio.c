@@ -5,7 +5,9 @@
  * STATUS for GPIO0..48. Pins that are neither driven from outside ("pin-in"
  * lines) nor enabled as outputs read as 1, as if pulled up. Outputs are
  * reported on "pin-out" lines (1 while not enabled). The GPIO matrix and IO_MUX are not modeled:
- * the board wiring connects pins directly.
+ * the board wiring connects pins directly. Read-only "in-samples" counts guest
+ * reads of IN/IN1, at most one per 8 ms of virtual time, so scripts can hold a
+ * key until the guest has looked.
  *
  * Copyright (c) 2023 Espressif Systems (Shanghai) Co. Ltd.
  *
@@ -16,6 +18,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
@@ -131,12 +134,25 @@ static void gpio_set_in(void *opaque, int n, int level)
     gpio_update(s);
 }
 
+static void gpio_sample(ESP32S3GPIOState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (now - s->last_sample_ns >= ESP32S3_GPIO_SAMPLE_NS) {
+        s->last_sample_ns = now;
+        s->in_samples++;
+    }
+}
+
 static uint64_t gpio_read(void *opaque, hwaddr addr, unsigned int size)
 {
     ESP32S3GPIOState *s = opaque;
 
     if (addr >= R_PIN0 && addr <= R_PIN48) {
         return s->pin[(addr - R_PIN0) / 4];
+    }
+    if (addr == R_IN || addr == R_IN1) {
+        gpio_sample(s);
     }
     switch (addr) {
     case R_OUT:            return LO32(s->out_reg);
@@ -224,6 +240,8 @@ static void esp32s3_gpio_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), s->out, ESP32S3_GPIO_OUT, ESP32S3_GPIO_COUNT);
     qdev_init_gpio_out_named(DEVICE(obj), &s->wake, ESP32S3_GPIO_WAKE, 1);
     qdev_init_gpio_out_named(DEVICE(obj), s->rtc_pad, ESP32S3_GPIO_RTC_PAD, ESP32S3_GPIO_RTC_PAD_COUNT);
+    s->last_sample_ns = -ESP32S3_GPIO_SAMPLE_NS;
+    object_property_add_uint32_ptr(obj, "in-samples", &s->in_samples, OBJ_PROP_FLAG_READ);
 }
 
 static Property esp32s3_gpio_properties[] = {

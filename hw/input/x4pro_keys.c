@@ -3,6 +3,8 @@
  * active low with pull-ups. Driven from the host keyboard (Up/Down arrows, P)
  * and from QOM bool properties "up", "down", "power" for scripted presses:
  *   qom-set /machine/x4pro-keys down true
+ * Read-only "vclock-ms" is the guest (virtual) clock, so scripts can hold a key
+ * for guest milliseconds instead of host ones.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -11,6 +13,8 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
+#include "qapi/visitor.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "ui/input.h"
@@ -58,6 +62,14 @@ KEY_PROP(up, KEY_UP)
 KEY_PROP(down, KEY_DOWN)
 KEY_PROP(power, KEY_POWER)
 
+static void get_vclock_ms(Object *obj, Visitor *v, const char *name,
+                          void *opaque, Error **errp)
+{
+    uint64_t ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+
+    visit_type_uint64(v, name, &ms, errp);
+}
+
 static void keys_realize(DeviceState *dev, Error **errp)
 {
     X4ProKeysState *s = X4PRO_KEYS(dev);
@@ -74,6 +86,8 @@ static void keys_init(Object *obj)
     object_property_add_bool(obj, "up", get_up, set_up);
     object_property_add_bool(obj, "down", get_down, set_down);
     object_property_add_bool(obj, "power", get_power, set_power);
+    object_property_add(obj, "vclock-ms", "uint64", get_vclock_ms,
+                        NULL, NULL, NULL);
 }
 
 static void keys_class_init(ObjectClass *klass, void *data)
