@@ -110,16 +110,17 @@ static uint32_t esp32s3_rtc_pads_awake(Esp32s3RtcCntlState *s, uint32_t *ext1_pa
 /* Deep sleep ends in a reset: the ROM boots again and reports DEEPSLEEP_RESET plus the cause. */
 static void esp32s3_rtc_deep_wake(Esp32s3RtcCntlState *s, uint32_t cause, uint32_t ext1_pads)
 {
+    int64_t slept = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s->deep_start_rt_ns + s->deep_skipped_ns;
+
     if (!s->sleeping) {
         return;
     }
     s->sleeping = false;
     timer_del(&s->sleep_timer);
     timer_del(&s->deep_timer);
-    trace_esp32s3_rtc_wake(qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), true, cause,
-                           (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s->deep_start_rt_ns) / SCALE_US);
+    trace_esp32s3_rtc_wake(qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), true, cause, slept / SCALE_US);
     /* The RTC counter kept running while the VM (and the virtual clock) was suspended. */
-    s->time_base_ns -= qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s->deep_start_rt_ns;
+    s->time_base_ns -= slept;
     /*
      * The SoC reset doesn't reach this device (the RTC domain keeps its
      * registers and counter), so end the sleep state here.
@@ -146,6 +147,7 @@ static void esp32s3_rtc_start_deep_sleep(Esp32s3RtcCntlState *s)
     s->sleeping = true;
     s->deep_sleeps++;
     s->deep_start_rt_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    s->deep_skipped_ns = 0;
     esp32s3_rtc_trace_sleep(s, true);
     if (cause) {
         esp32s3_rtc_deep_wake(s, cause, ext1_pads);
@@ -155,6 +157,16 @@ static void esp32s3_rtc_start_deep_sleep(Esp32s3RtcCntlState *s)
         int64_t left = esp32s3_rtc_alarm_ns(s) - qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         /* Too short to bother suspending (and racing the suspend request). */
         if (left < SCALE_MS) {
+            esp32s3_rtc_deep_wake(s, WAKE_TIMER, 0);
+            return;
+        }
+        /*
+         * deep-timer-skip: wake at once and count the whole alarm on the RTC
+         * counter (the guest's only clock across the reset), so a long timer
+         * sleep takes no host time. Pads can't wake it first.
+         */
+        if (s->deep_timer_skip) {
+            s->deep_skipped_ns = left;
             esp32s3_rtc_deep_wake(s, WAKE_TIMER, 0);
             return;
         }
@@ -552,6 +564,7 @@ static void esp32s3_rtc_cntl_init(Object *obj)
 }
 
 static Property esp32s3_rtc_cntl_properties[] = {
+    DEFINE_PROP_BOOL("deep-timer-skip", Esp32s3RtcCntlState, deep_timer_skip, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
