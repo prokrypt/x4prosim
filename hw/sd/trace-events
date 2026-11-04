@@ -77,6 +77,7 @@ aspeed_sdhci_write(uint64_t addr, uint32_t size, uint64_t data) "@0x%" PRIx64 " 
 # dwc_sdmmc.c
 dwc_sdmmc_command(uint8_t cmd, uint32_t arg, int rlen, bool data, bool write, uint32_t bytcnt, int64_t vns) "CMD%02u arg 0x%08x rlen %d data %u write %u bytcnt %u vns %" PRId64
 dwc_sdmmc_desc(uint64_t desc_addr, uint32_t buf, uint32_t len, bool write) "desc 0x%" PRIx64 " buf 0x%08x len %u write %u"
+dwc_sdmmc_card_power(int on, int64_t vns) "on %d vns %" PRId64
 dwc_sdmmc_update_irq(uint32_t rintsts, uint32_t idsts, uint32_t irq) "rintsts 0x%05x idsts 0x%03x irq 0x%x"
 
 # ssi-sd.c

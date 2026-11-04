@@ -118,6 +118,12 @@ typedef struct Esp32s3RtcCntlState {
     uint32_t light_sleeps;
     uint64_t light_sleep_us;    /* virtual time spent in light sleep */
     uint32_t deep_sleeps;
+
+    /* x4prosim: pad hold through deep sleep (traced at deep-sleep entry) */
+    uint32_t dig_iso;
+    uint32_t pad_hold;
+    uint32_t dig_pad_hold;
+    struct ESP32S3State *gpio;  /* set by the SoC: output levels of held pads */
 } Esp32s3RtcCntlState;
 
 #define ESP32S3_RTC_GPIO_WAKE "gpio-wake"
