@@ -20,13 +20,22 @@
  *  - PSR (0x00) REG=1: the register LUTs (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23
  *    WK, 0x24 KK; 6-byte groups [levels, TP_A..TP_D, RP]); drive = source -
  *    VCOM, VDH -> black, VDL -> white. VDHR (11) on a source row is not modeled.
- *  - REG=0, OTP waveform (bodies not dumped): inside PTIN/PTOUT (0x91/0x92,
- *    whole panel; no 0x90 window) changed pixels get "otp-fast-frames" toward
+ *  - REG=0, OTP waveform (bodies not dumped): inside PTIN/PTOUT (0x91/0x92)
+ *    changed pixels get "otp-fast-frames" toward
  *    NEW and held ones a weak "otp-hold-drive" (per mille) toward their own
  *    color, which wears a ghost down over later fast refreshes as the panel
  *    does; otherwise every pixel gets "otp-full-frames" away from NEW, then as
  *    many toward it.
  *  - CDI (0x50) N2OCP: NEW is copied to OLD after the refresh.
+ *  - PSR UD (bit 3) / SHL (bit 2) set the gate / source scan direction: gate g
+ *    shows RAM row g (UD=1) or 599 - g (UD=0) and the visible gates are 0..479;
+ *    source x shows RAM column x (SHL=1) or 799 - x. The X4 Pro driver sets
+ *    both, so a wrong PSR shows as a mirrored or shifted picture.
+ *  - PTL (0x90) window, in RAM coordinates, applies between PTIN and PTOUT once
+ *    written (until reset; without it PTIN means the whole panel): DTM writes
+ *    fill the window row by row, and a refresh drives only the pixels inside
+ *    it. A refresh that leaves visible pixels outside the window logs a guest error
+ *    (display-safety rule: no partial-window upload).
  * Per pixel and frame (ghosting mechanisms from the e-paper literature):
  *  - particle position moves 1/"swing-frames" of a full swing; the last
  *    "rail-soft" of the way to black or white is an exponential approach, so
@@ -76,6 +85,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(Uc8179State, UC8179)
 #define LUT_LEN 60              /* 10 groups; the X4 Pro driver writes 7 */
 #define LUT_GROUPS (LUT_LEN / 6)
 #define PSR_REG 0x20
+#define PSR_UD 0x08
+#define PSR_SHL 0x04
 #define CDI_N2OCP 0x08
 #define MAX_FRAMES 8192
 #define SHADES 1024
@@ -113,6 +124,8 @@ struct Uc8179State {
     uint8_t psr;            /* PSR byte 0 */
     uint8_t cdi;            /* CDI byte 0 */
     bool partial;           /* between PTIN and PTOUT */
+    uint8_t ptl[9];         /* PTL data as written */
+    bool ptl_set;           /* PTL written since reset */
     uint8_t lut[LUT_ROWS][LUT_LEN];
     uint8_t swing;          /* frames of one-way drive for a full black <-> white swing */
     uint32_t rail_soft;     /* per mille */
@@ -137,7 +150,7 @@ struct Uc8179State {
     uint8_t ram[2][H_ADDR][WB];
     Uc8179Ink *ink;         /* H x W */
     uint8_t cls[H][W];      /* OLD << 1 | NEW of the current refresh */
-    float (*frames)[4];     /* drive per class, + toward white */
+    float (*frames)[5];     /* drive per class (4: outside the PTL window), + toward white */
     float *dcl;             /* per pixel: net register-LUT drive in frames (DC ledger) */
     bool lut_refresh;       /* the refresh playing runs the register LUTs */
     double t_refresh;       /* virtual seconds at the end of the last refresh */
@@ -233,6 +246,7 @@ static int uc8179_lut_frames(Uc8179State *s)
             vdhr |= l[r] == 3;
             s->frames[n][k] = level[l[0]] - level[l[r]];
         }
+        s->frames[n][4] = 0;
         n++;
     }
     if (vdhr) {
@@ -249,12 +263,12 @@ static int uc8179_otp_frames(Uc8179State *s)
     if (s->partial) {
         float h = s->otp_hold_drive / 1000.0f;
         for (int i = 0; i < s->otp_fast_frames; i++, n++) {
-            memcpy(s->frames[n], (float[4]) { -h, 1, -1, h }, sizeof(s->frames[n]));
+            memcpy(s->frames[n], (float[5]) { -h, 1, -1, h, 0 }, sizeof(s->frames[n]));
         }
     } else {
         for (int i = 0; i < 2 * s->otp_full_frames; i++, n++) {
             float to_new = i < s->otp_full_frames ? -1 : 1;
-            memcpy(s->frames[n], (float[4]) { -to_new, to_new, -to_new, to_new },
+            memcpy(s->frames[n], (float[5]) { -to_new, to_new, -to_new, to_new, 0 },
                    sizeof(s->frames[n]));
         }
     }
@@ -315,7 +329,7 @@ static void uc8179_run_frame(Uc8179State *s, int f)
     float gs = s->remnant_slow_ms ? s->remnant_slow * 1.0f / s->remnant_slow_ms : 0;
     float t = s->anim_t0 + f * dt;
     const float *e = s->frames[f];
-    bool edges = bloom && (e[0] != e[1] || e[0] != e[2] || e[0] != e[3]);
+    bool edges = bloom && (e[0] != e[1] || e[0] != e[2] || e[0] != e[3] || e[0] != e[4]);
     double white = 0;
 
     for (int y = 0; y < H; y++) {
@@ -384,21 +398,47 @@ static void uc8179_anim_tick(void *opaque)
     uc8179_run_frames(s, uc8179_now());
 }
 
+/* The RAM window partial mode works in (PTL once written, else all of RAM). */
+static void uc8179_window(Uc8179State *s, int *x0, int *x1, int *y0, int *y1)
+{
+    const uint8_t *p = s->ptl;
+
+    if (!s->partial || !s->ptl_set) {
+        *x0 = 0, *x1 = W - 1, *y0 = 0, *y1 = H_ADDR - 1;
+        return;
+    }
+    /* HRST/HRED are in 8-pixel banks (low 3 bits 000 / 111); VRST/VRED in lines */
+    *x0 = MIN(((p[0] & 3) << 8 | p[1]) & ~7, W - 8);
+    *x1 = MIN(MAX(((p[2] & 3) << 8 | p[3]) | 7, *x0 + 7), W - 1);
+    *y0 = MIN((p[4] & 3) << 8 | p[5], H_ADDR - 1);
+    *y1 = MIN(MAX((p[6] & 3) << 8 | p[7], *y0), H_ADDR - 1);
+}
+
 /* Starts a refresh; returns its duration in ms. */
 static uint32_t uc8179_refresh(Uc8179State *s)
 {
     double now = uc8179_now();
+    bool ud = s->psr & PSR_UD, shl = s->psr & PSR_SHL;
+    int x0, x1, y0, y1, outside = 0;
 
     uc8179_run_frames(s, -1);       /* a refresh still playing finishes first */
     uc8179_relax(s, now, now > s->t_refresh);
-    /* The driver streams framebuffer row h-1-i into RAM row i. */
+    uc8179_window(s, &x0, &x1, &y0, &y1);
+    /* Shown row y is gate H-1-y: the driver streams framebuffer row h-1-i into RAM row i. */
     for (int y = 0; y < H; y++) {
-        int r = H - 1 - y;
+        int g = H - 1 - y, r = ud ? g : H_ADDR - 1 - g;
         for (int x = 0; x < W; x++) {
-            int o = (s->ram[PLANE_OLD][r][x / 8] >> (7 - x % 8)) & 1;
-            int nw = (s->ram[PLANE_NEW][r][x / 8] >> (7 - x % 8)) & 1;
-            s->cls[y][x] = o << 1 | nw;
+            int c = shl ? x : W - 1 - x;
+            int o = (s->ram[PLANE_OLD][r][c / 8] >> (7 - c % 8)) & 1;
+            int nw = (s->ram[PLANE_NEW][r][c / 8] >> (7 - c % 8)) & 1;
+            bool in = c >= x0 && c <= x1 && r >= y0 && r <= y1;
+            s->cls[y][x] = in ? o << 1 | nw : 4;
+            outside += !in;
         }
+    }
+    if (outside) {
+        qemu_log_mask(LOG_GUEST_ERROR, "uc8179: partial-window refresh x %d..%d y %d..%d, "
+                      "%d visible pixels left undriven\n", x0, x1, y0, y1, outside);
     }
     s->lut_refresh = s->psr & PSR_REG;
     s->anim_n = s->lut_refresh ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
@@ -431,7 +471,9 @@ static uint32_t uc8179_refresh(Uc8179State *s)
     }
     trace_uc8179_refresh((int64_t)(now * 1e6), s->anim_n, !!(s->psr & PSR_REG), s->frame_us);
     if (s->cdi & CDI_N2OCP) {
-        memcpy(s->ram[PLANE_OLD], s->ram[PLANE_NEW], sizeof(s->ram[PLANE_NEW]));
+        for (int r = y0; r <= y1; r++) {
+            memcpy(&s->ram[PLANE_OLD][r][x0 / 8], &s->ram[PLANE_NEW][r][x0 / 8], (x1 - x0 + 1) / 8);
+        }
     }
     uc8179_run_frames(s, s->animate ? now : -1);
     return MAX(1, (uint64_t)s->anim_n * s->frame_us / 1000);
@@ -499,13 +541,23 @@ static void uc8179_data(Uc8179State *s, uint8_t v)
             s->cdi = v;
         }
         break;
+    case 0x90:
+        if (s->pos < sizeof(s->ptl)) {
+            s->ptl[s->pos++] = v;
+            s->ptl_set |= s->pos == 8;  /* PT_SCAN (byte 9) is not modeled */
+        }
+        break;
     case 0x10:
-    case 0x13:
-        if (s->pos < H_ADDR * WB) {
-            s->ram[s->cmd == 0x10 ? PLANE_OLD : PLANE_NEW][s->pos / WB][s->pos % WB] = v;
+    case 0x13: {
+        int x0, x1, y0, y1;
+        uc8179_window(s, &x0, &x1, &y0, &y1);
+        int wb = (x1 - x0 + 1) / 8;
+        if (s->pos < (uint32_t)wb * (y1 - y0 + 1)) {
+            s->ram[s->cmd == 0x10 ? PLANE_OLD : PLANE_NEW][y0 + s->pos / wb][x0 / 8 + s->pos % wb] = v;
             s->pos++;
         }
         break;
+    }
     }
 }
 
@@ -606,6 +658,7 @@ static void uc8179_reset_regs(Uc8179State *s)
     s->psr = 0x0F;      /* REG=0: OTP waveforms */
     s->cdi = 0x31;      /* N2OCP off */
     s->partial = false;
+    s->ptl_set = false;
     memset(s->lut, 0, sizeof(s->lut));
 }
 
