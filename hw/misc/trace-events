@@ -370,6 +370,7 @@ aspeed_sliio_read(uint64_t offset, unsigned int size, uint32_t data) "To 0x%" PR
 
 # esp32s3_rtc_cntl.c
 esp32s3_rtc_sleep(int64_t t_us, int deep, uint32_t ena, int64_t alarm_us) "t_us=%" PRId64 " deep=%d ena=0x%x alarm_us=%" PRId64
+esp32s3_rtc_deep_pads(uint64_t held, uint64_t held_high, uint64_t unheld_out) "held=0x%" PRIx64 " held_high=0x%" PRIx64 " unheld_out=0x%" PRIx64
 esp32s3_rtc_wake(int64_t t_us, int deep, uint32_t cause, int64_t slept_us) "t_us=%" PRId64 " deep=%d cause=0x%x slept_us=%" PRId64
 
 # esp32s3_ledc.c

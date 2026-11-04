@@ -207,6 +207,11 @@ Done on `x4prosim`:
   trace into light-sleep residency, wakes per cause and the most common wake gaps
   (periodic wakers). `x4prosim/deepsleep-test.py` checks light and deep sleep
   over qtest. CrossDink 1101b logs `ls=0` in the sim and the counter agrees (0).
+  At each deep-sleep entry `esp32s3_rtc_deep_pads` traces the pads that hold their
+  level (RTC_CNTL PAD_HOLD for GPIO0..21, DIG_PAD_HOLD under DIG_ISO autohold for
+  GPIO22..48), which of them are held high, and the outputs left unheld (they float
+  in deep sleep); `sleepmeasure.py` lists them by GPIO. CrossDink 1101b: held high
+  1 2 5 14, held low/input 8 9, unheld outputs 4 11 12 13 18 19 20.
 - SD card: `x4prosim/mksd.py` makes an MBR + FAT32 image (SdFat needs the MBR);
   the existing `dwc_sdmmc` model mounts it. Size is a power of 2 MB, at least 64
   (QEMU refuses other sizes; smaller FAT32 reads as FAT16); several folders can be

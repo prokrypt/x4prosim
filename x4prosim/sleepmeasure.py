@@ -2,13 +2,14 @@
 """Light-sleep residency and wake causes from an RTC_CNTL trace (battery work without device logs).
 
 usage: sleepmeasure.py trace.log [from_s [to_s]]
-trace.log: QEMU -D output with -d trace:esp32s3_rtc_sleep,trace:esp32s3_rtc_wake (virtual
+trace.log: QEMU -D output with -d trace:esp32s3_rtc_* (virtual
 times, so they line up with the firmware's millis()). from_s/to_s limit it to a window.
 
 Prints the light-sleep count, the share of guest time asleep (residency), sleep lengths,
 wakes per cause, and the most common gaps between wakes: a periodic waker (a 1 s loop
 tick, a 250 ms select) shows up as a peak at its period. Deep sleeps are listed one by one
-(slept time is host time, the guest clock stops)."""
+(slept time is host time, the guest clock stops), with the pads that hold their level
+through it and the outputs left floating."""
 import collections, re, sys
 
 CAUSE = {0: "none", 1: "ext0", 2: "ext1", 4: "gpio", 8: "timer"}
@@ -16,7 +17,14 @@ lo = float(sys.argv[2]) * 1e6 if len(sys.argv) > 2 else 0
 hi = float(sys.argv[3]) * 1e6 if len(sys.argv) > 3 else float("inf")
 first = last = start = None
 sleeps, wakes, deep = [], [], []    # light sleep lengths (us), light wake (t, cause), deep (t, cause, slept)
+pads = []    # deep-sleep entry pad lines
 for line in open(sys.argv[1], errors="replace"):
+    m = re.search(r"esp32s3_rtc_deep_pads held=0x(\w+) held_high=0x(\w+) unheld_out=0x(\w+)", line)
+    if m:
+        held, high, unheld = (int(x, 16) for x in m.groups())
+        pins = lambda mask: " ".join(str(i) for i in range(49) if mask >> i & 1) or "-"
+        pads.append(f"held high {pins(high)} | held low/input {pins(held & ~high)} | unheld outputs {pins(unheld)}")
+        continue
     m = re.search(r"esp32s3_rtc_(sleep|wake) t_us=(\d+) deep=(\d) \w+=0x([0-9a-f]+) \w+=(-?\d+)", line)
     if not m:
         continue
@@ -46,5 +54,7 @@ if sleeps:
     print("wakes by cause  " + "  ".join(f"{c} {n}" for c, n in collections.Counter(c for _, c in wakes).most_common()))
     gaps = collections.Counter(round((b - a) / 1e4) * 10 for (a, _), (b, _) in zip(wakes, wakes[1:]))
     print("top wake gaps (ms x count)  " + "  ".join(f"{g}x{n}" for g, n in gaps.most_common(8)))
+for p in pads:
+    print(f"deep sleep pads (GPIO): {p}")
 for t, c, slept in deep:
     print(f"deep sleep woke at {t / 1e6:.1f} s by {c} after {slept / 1e6:.1f} s host")

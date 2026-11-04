@@ -410,6 +410,7 @@ static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
     qdev_realize(DEVICE(&s->intmatrix), &s->periph_bus, &error_fatal);
 
 
+    s->rtc_cntl.gpio = &s->gpio;
     qdev_realize(DEVICE(&s->rtc_cntl), &s->rtc_bus, &error_fatal);
     esp32s3_soc_add_periph_device(sys_mem, &s->rtc_cntl, DR_REG_RTCCNTL_BASE);
     memory_region_add_subregion_overlap(sys_mem, DR_REG_RTCIO_BASE + ESP32S3_RTCIO_EXT_WAKEUP0_OFFSET,
