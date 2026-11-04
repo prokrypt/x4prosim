@@ -145,7 +145,8 @@ class Sim:
         if kind == "cmd":
             self.set_mark()
             self.cdc.sendall(f"CMD:{arg}\n".encode())
-            got = self.waitlog(r"(?m)^(OK|ERR):[^\r\n]*", 90)    # WAITIDLE may take 60 s
+            # Whole line only: the reply can arrive split across socket reads.
+            got = self.waitlog(r"(?m)^(OK|ERR):[^\r\n]*(?=\r?\n)", 90)    # WAITIDLE may take 60 s
             return bool(got and got.startswith("OK:")), got or "no reply in 90 s"
         if kind == "shot":
             path = arg if "/" in arg else os.path.join(self.out, arg)

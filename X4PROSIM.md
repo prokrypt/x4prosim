@@ -87,7 +87,7 @@ keeps the image unchanged (every run cold, book open measured from scratch);
 
 `firmware.elf` beside you for symbols. To find a hang: run with `-s -S`, attach
 `xtensa-esp32s3-elf-gdb firmware.elf` (`target remote :1234`), let it run, Ctrl-C,
-`bt`. Or `info registers -a` on the HMP socket `/tmp/x4prosim-mon.sock` and
+`bt`. Or `info registers -a` on the HMP socket `/tmp/x4prosim/NAME/mon.sock` (run.sh prints it) and
 `xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <PC>`.
 
 Unmapped peripheral registers read as 0 and ignore writes (catch-all
@@ -230,13 +230,30 @@ Done on `x4prosim`:
   at the dark start and over the dark window, lit ms, early and late ms. The OTP
   (Half/Full) waveforms are stand-ins, so only their duck's presence is meaningful;
   register-LUT refreshes (gray, DU paint) play their real frames.
-- `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
-  `shot:file.png`, `hmp:cmd`). Example:
-  `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+- Instances: `run.sh` puts `mon.sock` (HMP), `qmp.sock` (QMP) and `log.txt` (firmware log
+  copy) in `/tmp/x4prosim/$X4NAME` (default: its pid; printed at start), so several sims
+  run side by side. `X4DISPLAY=none` runs it without the SDL window. Host tools reach an
+  instance through `x4prosim/x4qmp.py` (one QMP connection per call, so tools share it;
+  no NAME = the newest live instance).
+- Live view: `x4prosim/watch.py [NAME] [--port 8404] [--bind 0.0.0.0]` serves the panel
+  in a browser (stdlib only): status line (uptime, sleep, refresh count and waveform,
+  BUSY, light %, battery), press/drag on the picture = finger (swipes), Up/Down/Power/Home
+  buttons hold while pressed, arrows/P/H on a keyboard. Picture fetched only when the board
+  state changes (every poll while a refresh animates); each fetch also writes
+  `last.png` in the instance dir. Works with the SDL window open, or headless
+  (`X4DISPLAY=none`) on a cloud box over an SSH tunnel.
+- Replay: `x4prosim/replay.py rec.trace [NAME]` plays a recorded input journal (next item)
+  into a running instance at the recorded guest times (board state `uptime_us`), or
+  shifted to now if the instance is already past them. Checked: a 9-event journal
+  replayed from boot landed within 3 ms guest of the recording.
 - Input journal: every touch/Home change (window clicks or `qom-set`) and key
   press/release is traced with the virtual time: `gt911_input t_us=.. touch= x= y= home=`
   and `x4pro_key t_us=.. key= down=`. Record a session by hand in the SDL window with
   `x4prosim/run.sh flash.bin sd.img -d trace:gt911_input,trace:x4pro_key -D rec.trace`.
+- `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
+  `shot:file.png`, `hmp:cmd`). Example:
+  `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+  The NIC is on by default (NAT, host :8080 -> device :80; `X4NET` overrides as in run.sh).
 - `x4prosim/ota.py otadata flash.bin`: OTA slots, both otadata entries and the slot the
   bootloader picks. `x4prosim/ota.py test flash.bin app.bin`: Wi-Fi OTA end to end on a
   debug build (`/api/ota`): seeds wifi.json + `/debug/remote-token`, POSTs the app through a

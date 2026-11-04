@@ -49,7 +49,11 @@ copies a folder of books in.
 
 **Controls:** arrow keys are Up/Down and `P` is Power. Click in the window to
 touch. On the X3, Left/Right, Enter (Confirm) and Backspace (Back) are keys too.
-Monitor: `socat - unix:/tmp/x4prosim-mon.sock`.
+Monitor: `socat - unix:/tmp/x4prosim/NAME/mon.sock` (run.sh prints the instance dir; `X4NAME=name` picks it).
+
+**Browser view (phone, headless box):** `X4DISPLAY=none x4prosim/run.sh flash.bin sd.img`
+then `x4prosim/watch.py --bind 0.0.0.0` and open port 8404: live panel, tap/swipe on it,
+Up/Down/Power/Home buttons.
 
 **Headless / scripted:**
 ```sh
