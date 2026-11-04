@@ -142,6 +142,10 @@ struct Uc8179State {
     bool lut_refresh;       /* the refresh playing runs the register LUTs */
     double t_refresh;       /* virtual seconds at the end of the last refresh */
     double t_drift;         /* drift applied up to here */
+    uint32_t refreshes;     /* DRF count, for the board state */
+    int64_t last_t_us;      /* start of the last refresh */
+    int last_frames;
+    const char *last_wave;  /* its waveform: "lut", "otp-fast" or "otp-full" */
     uint8_t shade[SHADES + 1];
     bool redraw;
 };
@@ -401,6 +405,9 @@ static uint32_t uc8179_refresh(Uc8179State *s)
         }
     }
     s->lut_refresh = s->psr & PSR_REG;
+    s->refreshes++;
+    s->last_t_us = now * 1e6;
+    s->last_wave = s->lut_refresh ? "lut" : s->partial ? "otp-fast" : "otp-full";
     s->anim_n = s->lut_refresh ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
     if (s->lut_refresh) {
         /*
@@ -420,6 +427,7 @@ static uint32_t uc8179_refresh(Uc8179State *s)
                           sum[0], sum[1], sum[2], sum[3], s->anim_n);
         }
     }
+    s->last_frames = s->anim_n;
     s->anim_f = 0;
     s->anim_t0 = now;
     if (trace_event_get_state_backends(TRACE_UC8179_FRAME)) {
@@ -654,6 +662,18 @@ static void uc8179_update_display(void *opaque)
     dpy_gfx_update(s->con, 0, 0, surface_width(surface), surface_height(surface));
 }
 
+/* JSON for the board "state" property; schema in X4PROSIM.md */
+static char *uc8179_get_state(Object *obj, Error **errp)
+{
+    Uc8179State *s = UC8179(obj);
+
+    return g_strdup_printf("{\"refreshes\":%u,\"busy\":%s,\"animating\":%s,\"asleep\":%s,"
+                           "\"last\":{\"t_us\":%" PRId64 ",\"frames\":%d,\"wave\":\"%s\"}}",
+                           s->refreshes, s->busy ? "true" : "false",
+                           s->anim_f < s->anim_n ? "true" : "false", s->asleep ? "true" : "false",
+                           s->last_t_us, s->last_frames, s->last_wave ? s->last_wave : "");
+}
+
 static void uc8179_invalidate(void *opaque)
 {
     UC8179(opaque)->redraw = true;
@@ -742,6 +762,7 @@ static void uc8179_class_init(ObjectClass *klass, void *data)
     k->set_cs = uc8179_set_cs;
     k->cs_polarity = SSI_CS_LOW;
     device_class_set_props(dc, uc8179_properties);
+    object_class_property_add_str(klass, "state", uc8179_get_state, NULL);
 }
 
 static const TypeInfo uc8179_info = {
