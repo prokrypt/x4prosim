@@ -900,6 +900,13 @@ static void esp32s3_machine_init(MachineState *machine)
         sysbus_realize_and_unref(SYS_BUS_DEVICE(sens), &error_fatal);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_SENS_BASE,
                                             sysbus_mmio_get_region(SYS_BUS_DEVICE(sens), 0), 1);
+
+        /* LEDC: X4 Pro frontlight PWM; traces each channel's duty (esp32s3_ledc_duty) */
+        DeviceState *ledc = qdev_new("misc.esp32s3.ledc");
+        object_property_add_child(OBJECT(ss), "ledc", OBJECT(ledc));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(ledc), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_LEDC_BASE,
+                                            sysbus_mmio_get_region(SYS_BUS_DEVICE(ledc), 0), 1);
     }
 
     /*
