@@ -7,7 +7,8 @@
  * ready, bit 4 key down, low nibble contact count; a host write clears it)
  * and the first 8-byte point record 0x814F-0x8156. A new frame is latched when
  * input changes and the previous one has been cleared, and again after every
- * clear while a contact or the key is held. "int" idles low and pulses high
+ * clear while a contact or the key is held, at most once per 10 ms (the
+ * chip's default 100 Hz report rate). "int" idles low and pulses high
  * on each latch. GPIO inputs "power" (rail on when high) and "rst" (reset
  * while low) both default to running; while off or in reset the chip NACKs
  * its address, and leaving that state reloads the registers. The config is
@@ -58,12 +59,15 @@ OBJECT_DECLARE_SIMPLE_TYPE(GT911State, GT911)
 #define GT911_RES_X         480
 #define GT911_RES_Y         800
 #define GT911_TAP_MS        100
+#define GT911_SCAN_NS       (10 * SCALE_MS)     /* default 100 Hz report rate */
 
 struct GT911State {
     I2CSlave parent_obj;
 
     QemuInputHandlerState *input;
     QEMUTimer *tap_timer;
+    QEMUTimer *scan_timer;
+    int64_t last_latch_ns;  /* virtual time of the last latched frame */
     qemu_irq irq;
     uint8_t regs[GT911_NREGS];
     uint16_t ptr;
@@ -97,6 +101,7 @@ static void gt911_latch(GT911State *s)
         stw_le_p(pt + 5, 0x20);     /* contact size */
     }
     s->changed = false;
+    s->last_latch_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     qemu_irq_pulse(s->irq);
 }
 
@@ -105,12 +110,24 @@ static bool gt911_running(GT911State *s)
     return s->power && s->rst;
 }
 
+/* A frame latches at most once per scan period, like the chip's report rate. */
 static void gt911_kick(GT911State *s)
 {
+    int64_t due = s->last_latch_ns + GT911_SCAN_NS;
+
     if (gt911_running(s) && s->changed &&
         !(*gt911_reg(s, GT911_STATUS) & GT911_STATUS_READY)) {
-        gt911_latch(s);
+        if (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) < due) {
+            timer_mod(s->scan_timer, due);
+        } else {
+            gt911_latch(s);
+        }
     }
+}
+
+static void gt911_scan(void *opaque)
+{
+    gt911_kick(opaque);
 }
 
 static void gt911_set_input(GT911State *s, bool touch, bool key)
@@ -323,6 +340,7 @@ static void gt911_reset_hold(Object *obj, ResetType type)
     s->key = false;
     s->changed = false;
     timer_del(s->tap_timer);
+    timer_del(s->scan_timer);
 }
 
 static void gt911_reset_exit(Object *obj, ResetType type)
@@ -335,6 +353,7 @@ static void gt911_realize(DeviceState *dev, Error **errp)
     GT911State *s = GT911(dev);
 
     s->tap_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, gt911_tap_end, s);
+    s->scan_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, gt911_scan, s);
     s->input = qemu_input_handler_register(dev, &gt911_input_handler);
     qemu_input_handler_activate(s->input);
 }
@@ -345,6 +364,7 @@ static void gt911_unrealize(DeviceState *dev)
 
     qemu_input_handler_unregister(s->input);
     timer_free(s->tap_timer);
+    timer_free(s->scan_timer);
 }
 
 static void gt911_init(Object *obj)
