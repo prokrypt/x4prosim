@@ -163,7 +163,14 @@ Done on `x4prosim`:
   while asleep. Checked with CrossDink 1014a: Power sleeps, a short press wakes
   and re-sleeps, a held press boots to Home with `reset=DEEPSLEEP wake=EXT1`.
 - SD card: `x4prosim/mksd.py` makes an MBR + FAT32 image (SdFat needs the MBR);
-  the existing `dwc_sdmmc` model mounts it.
+  the existing `dwc_sdmmc` model mounts it. Size is a power of 2 MB, at least 64
+  (QEMU refuses other sizes; smaller FAT32 reads as FAT16); several folders can be
+  copied in (`mksd.py sd.img 1024 books/ settings/`); `--force` overwrites.
+- A real card as the image (reproduce a user's card): with CrossDink's USB Drive
+  on, `sudo dd if=/dev/sdX of=card.img bs=4M status=progress` (the whole disk,
+  not `sdX1`), then `truncate -s 32G card.img` up to the next power of 2. The
+  image holds settings and Wi-Fi/OPDS credentials: keep it out of git and shared
+  folders.
 - `hw/misc/esp32s3_ledc.c`: LEDC register file; each channel's output (duty or
   idle level) is latched on PARA_UP/DUTY_START and traced with the virtual time
   (`esp32s3_ledc_duty`). `uc8179` traces each refresh frame's panel mean
