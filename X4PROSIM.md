@@ -156,7 +156,15 @@ Done on `x4prosim`:
 - `x4prosim/testdata/`: real device logs, the panel OTP dump, battery history to
   seed the SD card, estimated power numbers. See its README.
 - `hw/input/x4pro_keys.c`: Up/Down/Power keys (arrow keys + P, or
-  `qom-set /machine/x4pro-keys down true`).
+  `qom-set /machine/x4pro-keys down true`), and the charger STAT line GPIO21
+  (`charging`, default false = LOW; it used to float HIGH = always charging).
+- Battery / USB (X4 Pro): `qom-set /machine/soc/jtag host-connected false`
+  unplugs the USB host (SOF stops, frame counter freezes) so the firmware takes
+  its on-battery paths; the firmware then drops its own log output until the
+  host is back, as on the device. CW2017 `soc`, `soc-frac` (1/256 %),
+  `vcell-mv`, `temp-c`, and `drain-pct-per-h` (SoC per hour of guest time,
+  negative charges). `drive.py` step
+  `battery:usb=0,charging=0,soc=20,drain=360` sets any of them.
 - `hw/misc/esp32s3_rtc_cntl.c`: light sleep: `SLEEP_EN` waits for the RTC timer
   alarm or a GPIO wake, and hides the sleep from the RTC counter so esp_timer
   isn't advanced twice.
@@ -429,7 +437,7 @@ Notes:
 | RTC | **BM8563** (PCF8563-compatible) at 0x51; start date from `-rtc base=`, moved at runtime by `qom-set /machine/bm8563 offset <seconds from host time>` (sets the clock like NTP would) | on I2C | done |
 | Fuel gauge | **CW2017** at 0x63 | on I2C | done |
 | Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | duty traced (`hw/misc/esp32s3_ledc.c`), no light in the window |
-| Charger | STAT GPIO21, active-HIGH = charging | GPIO | open |
+| Charger | STAT GPIO21, active-HIGH = charging | GPIO | done (`x4pro-keys charging`) |
 | Wi-Fi | MAC + fake open AP bridged to a QEMU NIC: NAT (`-nic user`, hostfwd) or LAN (`X4BR=br0`) | n/a | done |
 | Sleep | deep sleep + ext0/ext1 GPIO wake, RTC_NOINIT/RTC_DATA memory | RTC_CNTL | done |
 

@@ -1160,7 +1160,8 @@ static char *x4pro_get_state(Object *obj, Error **errp)
 /*
  * Xteink X4 Pro board: UC8179 panel on GPSPI2 (CS 13, DC 18, RST 14,
  * BUSY_N 6 through GPIO; SCLK 12 and SDA 11 also bit-banged for reads), the
- * Up/Down/Power keys (GPIO 0/7/3), and on I2C0 (SDA 39, SCL 38) the GT911
+ * Up/Down/Power keys (GPIO 0/7/3), the charger STAT line (GPIO21, driven by
+ * x4pro-keys "charging" so it no longer floats high), and on I2C0 (SDA 39, SCL 38) the GT911
  * touch (INT 10, RST 4, power enable GPIO2 active-low), BM8563 RTC and
  * CW2017 gauge.
  */
@@ -1188,6 +1189,7 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
     for (int k = 0; k < ARRAY_SIZE(key_pins); k++) {
         qdev_connect_gpio_out(keys, k, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, key_pins[k]));
     }
+    qdev_connect_gpio_out(keys, ARRAY_SIZE(key_pins), qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 21));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(keys), &error_fatal);
 
     DeviceState *i2c0 = DEVICE(object_resolve_path_component(OBJECT(ss), "i2c0"));

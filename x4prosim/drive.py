@@ -4,6 +4,8 @@
 usage: drive.py flash.bin sd.img log.txt STEP...
 steps:  wait:SECONDS     press:KEY[:MS]     shot:FILE.png
         hmp:COMMAND      (any monitor command, output printed)
+        battery:NAME=VALUE,...   (X4 Pro) soc=% frac=1/256% mv= temp=C
+                 drain=%/h (negative charges) charging=0|1 usb=0|1 (host on USB)
 KEY: up|down|power on the X4 Pro; back|confirm|left|right|up|down|power on the X3.
 The machine follows the image's chip (X4MACHINE=x3|x4pro overrides).
 The firmware log (USB-CDC) goes to log.txt.
@@ -19,6 +21,9 @@ qemu = os.path.join(here, "..", "build", "qemu-system-riscv32" if machine == "x3
 if not os.path.exists(qemu):    # release archives have the binaries in bin/
     qemu = os.path.join(here, "..", "bin", os.path.basename(qemu))
 keys = "x3-keys" if machine == "x3" else "x4pro-keys"
+battery_props = {"soc": "cw2017 soc", "frac": "cw2017 soc-frac", "mv": "cw2017 vcell-mv",
+                 "temp": "cw2017 temp-c", "drain": "cw2017 drain-pct-per-h",
+                 "charging": "x4pro-keys charging", "usb": "soc/jtag host-connected"}
 sock = f"/tmp/x4prosim-{os.getpid()}.sock"
 sdopt = {"": "if=sd", "snapshot": "if=sd,snapshot=on", "none": "if=none"}.get(os.environ.get("X4SD", ""))
 if not sdopt:
@@ -74,6 +79,12 @@ try:
             print(hmp(f"screendump {os.path.abspath(arg)} -f png panel") or f"shot {arg}")
         elif kind == "hmp":
             print(hmp(arg))
+        elif kind == "battery":
+            for kv in arg.split(","):
+                name, _, val = kv.partition("=")
+                if name in ("charging", "usb"):
+                    val = "true" if val == "1" else "false"
+                print(hmp(f"qom-set /machine/{battery_props[name]} {val}") or kv)
         else:
             sys.exit(f"unknown step {step}")
 finally:
