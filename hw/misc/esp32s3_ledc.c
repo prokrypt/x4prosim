@@ -120,11 +120,25 @@ static const MemoryRegionOps ledc_ops = {
     .valid.max_access_size = 4,
 };
 
+/* JSON for the board "state" property: [level, max] per channel */
+static char *ledc_get_state(Object *obj, Error **errp)
+{
+    Esp32s3LedcState *s = ESP32S3_LEDC(obj);
+    GString *j = g_string_new("[");
+
+    for (int ch = 0; ch < LEDC_CHANNELS; ch++) {
+        g_string_append_printf(j, "%s[%u,%u]", ch ? "," : "", s->level[ch], s->max[ch]);
+    }
+    g_string_append_c(j, ']');
+    return g_string_free(j, false);
+}
+
 static void ledc_init(Object *obj)
 {
     Esp32s3LedcState *s = ESP32S3_LEDC(obj);
     memory_region_init_io(&s->iomem, obj, &ledc_ops, s, TYPE_ESP32S3_LEDC, LEDC_REGS_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+    object_property_add_str(obj, "state", ledc_get_state, NULL);
 }
 
 static const TypeInfo ledc_info = {

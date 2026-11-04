@@ -4,6 +4,9 @@
  * and from QOM bool properties "up", "down", "power" for scripted presses:
  *   qom-set /machine/x4pro-keys down true
  * Each press and release is traced with the virtual time (x4pro_key).
+ * Also the charger's STAT line (GPIO21, active high, LOW = not charging) from
+ * the bool property "charging", so the sim can run on battery or charge:
+ *   qom-set /machine/x4pro-keys charging true
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -22,11 +25,13 @@
 OBJECT_DECLARE_SIMPLE_TYPE(X4ProKeysState, X4PRO_KEYS)
 
 enum { KEY_UP, KEY_DOWN, KEY_POWER, KEY_COUNT };
+#define OUT_STAT KEY_COUNT
 
 struct X4ProKeysState {
     SysBusDevice parent_obj;
-    qemu_irq out[KEY_COUNT];    /* pin level: 1 released, 0 pressed */
+    qemu_irq out[KEY_COUNT + 1];    /* keys: 1 released, 0 pressed; then STAT */
     bool pressed[KEY_COUNT];
+    bool charging;
 };
 
 static const char *const key_names[KEY_COUNT] = { "up", "down", "power" };
@@ -66,6 +71,18 @@ KEY_PROP(up, KEY_UP)
 KEY_PROP(down, KEY_DOWN)
 KEY_PROP(power, KEY_POWER)
 
+static bool get_charging(Object *o, Error **e)
+{
+    return X4PRO_KEYS(o)->charging;
+}
+
+static void set_charging(Object *o, bool v, Error **e)
+{
+    X4ProKeysState *s = X4PRO_KEYS(o);
+    s->charging = v;
+    qemu_set_irq(s->out[OUT_STAT], v);
+}
+
 static void keys_realize(DeviceState *dev, Error **errp)
 {
     X4ProKeysState *s = X4PRO_KEYS(dev);
@@ -73,15 +90,17 @@ static void keys_realize(DeviceState *dev, Error **errp)
     for (int k = 0; k < KEY_COUNT; k++) {
         keys_set(s, k, false);
     }
+    qemu_set_irq(s->out[OUT_STAT], s->charging);
 }
 
 static void keys_init(Object *obj)
 {
     X4ProKeysState *s = X4PRO_KEYS(obj);
-    qdev_init_gpio_out(DEVICE(obj), s->out, KEY_COUNT);
+    qdev_init_gpio_out(DEVICE(obj), s->out, KEY_COUNT + 1);
     object_property_add_bool(obj, "up", get_up, set_up);
     object_property_add_bool(obj, "down", get_down, set_down);
     object_property_add_bool(obj, "power", get_power, set_power);
+    object_property_add_bool(obj, "charging", get_charging, set_charging);
 }
 
 static void keys_class_init(ObjectClass *klass, void *data)

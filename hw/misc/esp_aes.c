@@ -78,7 +78,8 @@ static void esp_aes_dma_start(ESPAesState *s)
         [ESP_AES_ECB_CIPHER]    = GCRY_CIPHER_MODE_ECB,
         [ESP_AES_CBC_CIPHER]    = GCRY_CIPHER_MODE_CBC,
         [ESP_AES_OFB_CIPHER]    = GCRY_CIPHER_MODE_OFB,
-        [ESP_AES_CTR_CIPHER]    = GCRY_CIPHER_MODE_CTR,
+        /* CTR builds its counter blocks itself (INC32/INC128) and encrypts them in ECB mode */
+        [ESP_AES_CTR_CIPHER]    = GCRY_CIPHER_MODE_ECB,
         [ESP_AES_CFB8_CIPHER]   = GCRY_CIPHER_MODE_CFB8,
         [ESP_AES_CFB128_CIPHER] = GCRY_CIPHER_MODE_CFB,
     };
@@ -124,9 +125,7 @@ static void esp_aes_dma_start(ESPAesState *s)
     /* `iv_mem` field represents the Initialization Vector for CBC/OFB/CFB operations
      * But it represents the Initial Counter Block for CTR operation.
      * It shall be ignored for ECB block operation. */
-    if (cipher_mode == ESP_AES_CTR_CIPHER) {
-        err = gcry_cipher_setctr(ghandle, iv_mem, ESP_AES_IV_REG_CNT);
-    } else if (cipher_mode != ESP_AES_ECB_CIPHER) {
+    if (cipher_mode != ESP_AES_ECB_CIPHER && cipher_mode != ESP_AES_CTR_CIPHER) {
         err = gcry_cipher_setiv(ghandle, iv_mem, ESP_AES_IV_REG_CNT);
     }
 
@@ -155,12 +154,36 @@ static void esp_aes_dma_start(ESPAesState *s)
     }
 
     /* Reading was successful, process the buffer (encrypt/decrypt) and write back to the GDMA OUT buffer */
-    if (encrypt) {
+    if (cipher_mode == ESP_AES_CTR_CIPHER) {
+        /* gcrypt's CTR mode always increments the whole 128-bit block, but INC_SEL 0 selects
+         * NIST's INC32 (only the last 32 bits count, wrapping without a carry; ESP-IDF's GCM
+         * sets it), so the counter blocks are built here and encrypted in ECB mode. Encryption
+         * and decryption are the same operation, and IV memory ends at the next counter. */
+        g_autofree uint8_t *stream = g_malloc(buf_size);
+        for (uint32_t i = 0; i < s->block_num_reg; i++) {
+            memcpy(stream + i * ESP_AES_IV_REG_CNT, iv_mem, ESP_AES_IV_REG_CNT);
+            esp_aes_ctr_add_counter(s, 1);
+        }
+        err = gcry_cipher_encrypt(ghandle, stream, buf_size, NULL, 0);
+        for (uint32_t i = 0; i < buf_size; i++) {
+            buffer[i] ^= stream[i];
+        }
+    } else if (encrypt) {
+        /* The last block of plaintext, needed for OFB */
+        uint8_t plaintext[ESP_AES_IV_REG_CNT];
+        memcpy(plaintext, buffer + buf_size - ESP_AES_IV_REG_CNT, ESP_AES_IV_REG_CNT);
+
         err = gcry_cipher_encrypt(ghandle, buffer, buf_size, NULL, 0);
 
-        if (cipher_mode != ESP_AES_CTR_CIPHER) {
-            /* On the real hardware, IV memory is used in-place for encrypting data, so copy the last encrypted block to IV memory */
-            memcpy(iv_mem, buffer + buf_size - 16, ESP_AES_IV_REG_CNT);
+        /* On the real hardware, IV memory is used in-place for encrypting data, so copy the last encrypted block to IV memory */
+        memcpy(iv_mem, buffer + buf_size - 16, ESP_AES_IV_REG_CNT);
+
+        /* For OFB, IV memory holds the last output of the block cipher: the last ciphertext block
+         * XOR the last plaintext block, as on the decryption side below. */
+        if (cipher_mode == ESP_AES_OFB_CIPHER) {
+            for (int i = 0; i < ESP_AES_IV_REG_CNT; i++) {
+                iv_mem[i] ^= plaintext[i];
+            }
         }
     } else {
         /* Store the last block of plaintext, needed for OFB */
@@ -169,7 +192,7 @@ static void esp_aes_dma_start(ESPAesState *s)
         memcpy(plaintext, buffer_last_block, ESP_AES_IV_REG_CNT);
 
         /* The IV memory is initalized with the encrypted data, so do the copy now */
-        if (cipher_mode != ESP_AES_OFB_CIPHER && cipher_mode != ESP_AES_CTR_CIPHER) {
+        if (cipher_mode != ESP_AES_OFB_CIPHER) {
             memcpy(iv_mem, buffer + buf_size - 16, ESP_AES_IV_REG_CNT);
         }
 
@@ -182,10 +205,6 @@ static void esp_aes_dma_start(ESPAesState *s)
                 iv_mem[i] = buffer_last_block[i] ^ plaintext[i];
             }
         }
-    }
-
-    if (cipher_mode == ESP_AES_CTR_CIPHER) {
-        esp_aes_ctr_add_counter(s, s->block_num_reg);
     }
 
     if (err) {
