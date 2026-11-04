@@ -176,6 +176,17 @@ Done on `x4prosim`:
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+- `x4prosim/sim.py`: scripted test runner. The USB-CDC console is a socket, so steps can
+  send serial-remote commands (`cmd GOTO settings`, `cmd WAITIDLE 30000`; CrossDink
+  debug builds) and wait for log lines (`waitlog Home 240`), besides `key`, `tap X,Y`,
+  `shot NAME`, `hmp`, `wait`. Steps come from argv, `@steps.txt` or stdin; `--json`
+  prints one JSON line per step; it stops at the first failed step (exit 1). Each run
+  lives in its own DIR (log.txt, sockets, shots), so several run in parallel:
+  `x4prosim/sim.py --json flash.bin sd.img out/ "waitlog Home 240" "cmd WAITIDLE 30000" "shot home"`
+- `x4prosim/shotdiff.py shot.png golden.png [--mask X,Y,W,H] [--diff d.png]`: pixel diff
+  outside masked boxes (also `golden.mask`, one box per line). Goldens may be device
+  captures (480x800 BMP, PBM/PGM from `/api/screenshot`); `--bw` compares black/white
+  for device-vs-sim parity. Exit 1 on more than `--max` differing pixels.
 
 - GDMA (AES, SHA) uses the system address space, so guest DRAM and PSRAM addresses
   resolve. It was rooted at the DRAM region (address 0 = 0x3FC80000), every transfer
