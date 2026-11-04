@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deep-sleep self-check for the X4 Pro RTC_CNTL model, over QEMU's qtest protocol (no firmware).
+"""Light- and deep-sleep self-check for the X4 Pro RTC_CNTL model, over QEMU's qtest protocol (no firmware).
 
 usage: x4prosim/deepsleep-test.py
 Arms each wake source the way ESP-IDF does, enters deep sleep, and checks the VM suspends,
@@ -14,9 +14,11 @@ if not os.path.exists(qemu):
 RTC, RTCIO = 0x60008000, 0x60008400
 SLP_TIMER0, SLP_TIMER1, STATE0, RESET_STATE, WAKEUP_STATE = 0x04, 0x08, 0x18, 0x38, 0x3C
 TIME_UPDATE, TIME0 = 0x0C, 0x10
+INT_RAW, INT_CLR = 0x44, 0x4C
 EXT_WAKEUP_CONF, DIG_PWC, EXT_WAKEUP1, EXT_WAKEUP1_STATUS, WAKEUP_CAUSE = 0x64, 0x90, 0xE0, 0xE4, 0x130
 EXT0, EXT1, TIMER = 1, 2, 8
 GPIO = "/machine/soc/gpio"
+TRACE = f"/tmp/x4prosim-deepsleep-{os.getpid()}.trace"
 
 
 class QTest:
@@ -26,7 +28,8 @@ class QTest:
         srv.bind(sock)
         srv.listen(1)
         self.p = subprocess.Popen([qemu, "-machine", "x4pro", "-accel", "qtest", "-display", "none",
-                                   "-qtest", f"unix:{sock}", "-qtest-log", "/dev/null", "-monitor", "none", "-serial", "null"],
+                                   "-qtest", f"unix:{sock}", "-qtest-log", "/dev/null", "-monitor", "none", "-serial", "null",
+                                   "-d", "trace:esp32s3_rtc_wake", "-D", TRACE],
                                   stdout=subprocess.DEVNULL)
         self.s, _ = srv.accept()
         srv.close()
@@ -70,6 +73,18 @@ def check(q, name, cause):
 
 q = QTest()
 try:
+    # Light sleep (DIG_PWC clear) on the RTC timer 10 ms ahead: the wake interrupt after 20 ms.
+    q.w(RTC + TIME_UPDATE, 1 << 31)
+    q.w(RTC + SLP_TIMER0, q.r(RTC + TIME0) + 1500)
+    q.w(RTC + SLP_TIMER1, 1 << 16)
+    q.w(RTC + WAKEUP_STATE, TIMER << 15)
+    q.w(RTC + STATE0, 1 << 31)
+    q.cmd("clock_step 20000000")
+    assert q.r(RTC + INT_RAW) & 1, "light: no wake interrupt"
+    assert q.r(RTC + WAKEUP_CAUSE) == TIMER, "light: cause"
+    q.w(RTC + INT_CLR, 1)
+    print("ok  light sleep RTC timer")
+
     # ext1, any low on GPIO3 (Power): nothing until the pad drops, then GPIO3 in the status.
     q.w(RTC + EXT_WAKEUP1, 1 << 3)
     q.w(RTC + EXT_WAKEUP_CONF, 0)
@@ -102,3 +117,7 @@ try:
     print("ok  RTC counter advanced by the sleep")
 finally:
     q.close()
+wakes = [l.split(" deep=")[1].split()[:2] for l in open(TRACE) if "esp32s3_rtc_wake" in l]
+os.unlink(TRACE)
+assert wakes == [["0", "cause=0x8"], ["1", "cause=0x2"], ["1", "cause=0x1"], ["1", "cause=0x8"]], f"trace: wakes {wakes}"
+print("ok  wakes traced")

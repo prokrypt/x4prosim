@@ -368,5 +368,9 @@ aspeed_sli_read(uint64_t offset, unsigned int size, uint32_t data) "To 0x%" PRIx
 aspeed_sliio_write(uint64_t offset, unsigned int size, uint32_t data) "To 0x%" PRIx64 " of size %u: 0x%" PRIx32
 aspeed_sliio_read(uint64_t offset, unsigned int size, uint32_t data) "To 0x%" PRIx64 " of size %u: 0x%" PRIx32
 
+# esp32s3_rtc_cntl.c
+esp32s3_rtc_sleep(int64_t t_us, int deep, uint32_t ena, int64_t alarm_us) "t_us=%" PRId64 " deep=%d ena=0x%x alarm_us=%" PRId64
+esp32s3_rtc_wake(int64_t t_us, int deep, uint32_t cause, int64_t slept_us) "t_us=%" PRId64 " deep=%d cause=0x%x slept_us=%" PRId64
+
 # esp32s3_ledc.c
 esp32s3_ledc_duty(int64_t t_us, unsigned ch, unsigned level, unsigned max) "t_us=%" PRId64 " ch=%u level=%u max=%u"

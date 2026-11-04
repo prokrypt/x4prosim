@@ -162,6 +162,15 @@ Done on `x4prosim`:
   wake sleeps its length in host time. `info status` shows `paused (suspended)`
   while asleep. Checked with CrossDink 1014a: Power sleeps, a short press wakes
   and re-sleeps, a held press boots to Home with `reset=DEEPSLEEP wake=EXT1`.
+- Sleep observability (same file): every sleep entry and wake is traced
+  (`esp32s3_rtc_sleep` with the wake sources and ms to the timer alarm,
+  `esp32s3_rtc_wake` with the cause and time slept), and QOM read-only counters
+  `qom-get /machine/soc/rtc_cntl light-sleeps` (`light-sleep-us`, `deep-sleeps`,
+  `wake-cause`) count since QEMU started. `x4prosim/sleepmeasure.py trace.log
+  [from_s [to_s]]` turns a `-d trace:esp32s3_rtc_sleep,trace:esp32s3_rtc_wake`
+  trace into light-sleep residency, wakes per cause and the most common wake gaps
+  (periodic wakers). `x4prosim/deepsleep-test.py` checks light and deep sleep
+  over qtest. CrossDink 1101b logs `ls=0` in the sim and the counter agrees (0).
 - SD card: `x4prosim/mksd.py` makes an MBR + FAT32 image (SdFat needs the MBR);
   the existing `dwc_sdmmc` model mounts it.
 - `hw/misc/esp32s3_ledc.c`: LEDC register file; each channel's output (duty or
