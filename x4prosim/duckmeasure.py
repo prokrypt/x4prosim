@@ -6,7 +6,8 @@ trace.log: QEMU -D output with -d trace:esp32s3_ledc_duty,trace:uc8179_frame (al
 times are virtual, so the firmware's millis() line up with them).
 
 A refresh flashes when its panel mean (0 black .. 1 white) dips at least min_dip
-(default 0.15) below both its start and its end. Its dark window runs from the
+(default 0.15) below both its start and its end, or rises that far above both
+(Night Mode: the dark background swings white). Its dark window runs from the
 first to the last frame below half that dip (each side against its own level).
 The light is the sum of all LEDC channels' duty fractions (PWM duty ~ light).
 Per flash: light at the dark start and its mean over the window, as % of the
@@ -56,6 +57,11 @@ for t, f, w in frames:
 
 print("start_ms   dip  dark_ms  light@dark  mean  lit_ms  early_ms  late_ms")
 for r in refreshes:
+    ws = [w for _, w in r]
+    dip = min(ws[0], ws[-1]) - min(ws)
+    peak = max(ws) - max(ws[0], ws[-1])
+    if peak > dip:      # Night Mode: the dark background swings white; mirror it into a dip
+        r = [(t, -w) for t, w in r]
     before, after = r[0][1], r[-1][1]
     low = min(w for _, w in r)
     if before - low < min_dip or after - low < min_dip:
