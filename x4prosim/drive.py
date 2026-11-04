@@ -8,6 +8,9 @@ steps:  wait:SECONDS     press:KEY[:MS]     shot:FILE.png
                  drain=%/h (negative charges) charging=0|1 usb=0|1 (host on USB)
 KEY: up|down|power on the X4 Pro; back|confirm|left|right|up|down|power on the X3.
 The machine follows the image's chip (X4MACHINE=x3|x4pro overrides).
+X4DET=1: deterministic guest time (icount sleep=off, RTC fixed at 2026-01-01 on the VM clock),
+so boot/open ms in the log repeat across runs and host load; idle guest time then runs ahead
+of the host, so wait: steps cover more guest time.
 The firmware log (USB-CDC) goes to log.txt.
 SD: X4SD=snapshot discards the run's SD writes (cold caches every run); X4SD=none boots with no card."""
 import os, socket, subprocess, sys, time
@@ -33,13 +36,15 @@ if not os.path.exists(sd):
 subprocess.run(["cp", img, img + ".run"], check=True)
 # X3 regional instruction costs are nanoseconds; Xtensa keeps 4 ns ticks.
 icount_shift = 0 if machine == "x3" else 2
+det = os.environ.get("X4DET") == "1"
 p = subprocess.Popen([qemu, "-machine", machine,
-                      "-icount", f"shift={icount_shift},sleep=on",
+                      "-icount", f"shift={icount_shift},sleep={'off' if det else 'on'}",
                       "-display", "none", "-serial", "null",
                       "-drive", f"file={img}.run,if=mtd,format=raw", "-drive", f"file={sd},{sdopt},format=raw",
                       "-chardev", f"file,id=cdc,path={log}",
                       "-global", "driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc",
-                      "-monitor", f"unix:{sock},server,nowait"] + os.environ.get("QEMU_EXTRA", "").split(),
+                      "-monitor", f"unix:{sock},server,nowait"]
+                     + (["-rtc", "base=2026-01-01T00:00:00,clock=vm"] if det else []) + os.environ.get("QEMU_EXTRA", "").split(),
                      stdout=subprocess.DEVNULL, stderr=sys.stderr)
 for _ in range(50):
     if os.path.exists(sock):
