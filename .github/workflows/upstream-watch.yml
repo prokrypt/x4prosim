@@ -1,0 +1,75 @@
+name: 'upstream watch'
+
+# x4prosim: weekly report on Espressif's QEMU esp-develop, which this fork is based on.
+# Report only: never fails on what it finds, never pushes. Read the run summary.
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: x4prosim
+          fetch-depth: 0
+
+      - name: Compare with esp-develop
+        id: cmp
+        run: |
+          git remote add esp https://github.com/espressif/qemu.git
+          git fetch -q --no-tags esp esp-develop
+          base=$(git merge-base HEAD esp/esp-develop)
+          new=$(git rev-list --count "$base..esp/esp-develop")
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          {
+            echo "## esp-develop vs x4prosim"
+            echo "- fork base: \`$(git log -1 --format='%h %s' "$base")\`"
+            echo "- esp-develop: \`$(git log -1 --format='%h %s (%cs)' esp/esp-develop)\`"
+            echo "- new upstream commits: **$new**"
+            if [ "$new" != 0 ]; then
+              echo; echo "### Upstream commits (newest first, max 60)"
+              git log --format='- `%h` %s' -60 "$base..esp/esp-develop"
+              echo; echo "### Files we also changed"
+              comm -12 <(git diff --name-only "$base" esp/esp-develop | sort) \
+                       <(git diff --name-only "$base" HEAD | sort) | sed 's/^/- /'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trial merge
+        id: merge
+        if: steps.cmp.outputs.new != '0'
+        continue-on-error: true
+        run: |
+          git -c user.name=ci -c user.email=ci@localhost merge --no-edit esp/esp-develop > merge.log 2>&1 && exit 0
+          { echo "### Trial merge: conflicts"; git diff --name-only --diff-filter=U | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Install build deps
+        if: steps.merge.outcome == 'success'
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build libglib2.0-dev libpixman-1-dev libgcrypt20-dev libslirp-dev
+
+      - name: Build and boot the merged tree
+        if: steps.merge.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir build && cd build
+          ../configure --target-list=xtensa-softmmu --enable-gcrypt --enable-slirp --disable-sdl \
+            --disable-user --disable-capstone --disable-vnc --disable-gtk --disable-docs > ../build.log 2>&1
+          if ! ninja qemu-system-xtensa >> ../build.log 2>&1; then
+            { echo "### Trial merge: clean, BUILD FAILED"; echo '```'; tail -40 ../build.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          head -c 16777216 /dev/zero > blank.bin
+          set +e
+          timeout 10 ./qemu-system-xtensa -machine x4pro -display none -serial null -monitor none \
+            -drive file=blank.bin,if=mtd,format=raw -nic user,model=esp32_wifi
+          rc=$?
+          if [ $rc = 124 ]; then r="clean, builds, x4pro machine boots"; else r="clean, builds, x4pro machine EXITED $rc"; fi
+          echo "### Trial merge: $r" >> "$GITHUB_STEP_SUMMARY"
