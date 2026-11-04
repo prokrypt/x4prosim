@@ -48,8 +48,7 @@
  * measured waits). Other UC8179 commands (booster, PLL, VCOM, temperature
  * setting) are accepted and ignored; an opcode outside the UC8179 set counts
  * in "unknown-cmds" and logs LOG_UNIMP, and OTP programming (0xA0/0xA1) logs
- * a guest error. Read-only "refresh-count" and "last-mode" (lut, otp-fast,
- * otp-full) let host tools wait for and check refreshes with qom-get.
+ * a guest error.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -96,8 +95,6 @@ typedef struct Uc8179Ink {
 } Uc8179Ink;
 
 enum { PLANE_OLD, PLANE_NEW };
-enum { MODE_NONE, MODE_LUT, MODE_OTP_FAST, MODE_OTP_FULL };
-static const char *const uc8179_mode_name[] = { "none", "lut", "otp-fast", "otp-full" };
 
 struct Uc8179State {
     SSIPeripheral parent_obj;
@@ -110,9 +107,7 @@ struct Uc8179State {
     uint32_t pon_ms, pof_ms;    /* PON/POF BUSY time */
     int8_t temperature;     /* TSC (0x40) reading, C */
     uint8_t temp_rd[2];
-    uint32_t refresh_count;
     uint32_t unknown_cmds;
-    int last_mode;          /* MODE_* of the last refresh */
     bool animate;
     int anim_f, anim_n;     /* next frame to run, frames in the refresh */
     double anim_t0;         /* virtual seconds the refresh started */
@@ -422,8 +417,6 @@ static uint32_t uc8179_refresh(Uc8179State *s)
     }
     s->lut_refresh = s->psr & PSR_REG;
     s->anim_n = s->lut_refresh ? uc8179_lut_frames(s) : uc8179_otp_frames(s);
-    s->last_mode = s->lut_refresh ? MODE_LUT : s->partial ? MODE_OTP_FAST : MODE_OTP_FULL;
-    s->refresh_count++;
     if (s->lut_refresh) {
         /*
          * DC balance of the LUT set: a held pixel (KK, WW) must net zero and a
@@ -791,17 +784,11 @@ static void uc8179_set_temperature(Object *obj, Visitor *v, const char *name, vo
     UC8179(obj)->temperature = t;
 }
 
-static char *uc8179_get_last_mode(Object *obj, Error **errp)
-{
-    return g_strdup(uc8179_mode_name[UC8179(obj)->last_mode]);
-}
-
 static void uc8179_init(Object *obj)
 {
     Uc8179State *s = UC8179(obj);
 
     s->temperature = 25;
-    object_property_add_uint32_ptr(obj, "refresh-count", &s->refresh_count, OBJ_PROP_FLAG_READ);
     object_property_add_uint32_ptr(obj, "unknown-cmds", &s->unknown_cmds, OBJ_PROP_FLAG_READ);
 }
 
@@ -814,10 +801,9 @@ static void uc8179_class_init(ObjectClass *klass, void *data)
     k->transfer = uc8179_transfer;
     k->set_cs = uc8179_set_cs;
     k->cs_polarity = SSI_CS_LOW;
-    device_class_set_props(dc, uc8179_properties);
     object_class_property_add(klass, "temperature", "int32", uc8179_get_temperature,
                               uc8179_set_temperature, NULL, NULL);
-    object_class_property_add_str(klass, "last-mode", uc8179_get_last_mode, NULL);
+    device_class_set_props(dc, uc8179_properties);
 }
 
 static const TypeInfo uc8179_info = {
