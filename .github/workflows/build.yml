@@ -155,6 +155,13 @@ jobs:
           rc=$?
           [ $rc = 124 ] || { echo "machine $m exited with $rc"; exit 1; }
 
+      - name: Crypto test (${{ matrix.target }} @ ${{ matrix.platform }})
+        if : ${{ matrix.platform == 'x86_64-linux-gnu' && matrix.target == 'xtensa-softmmu' }}
+        run: |
+          # x4prosim: AES/SHA DMA models against host AES/hashlib over qtest (DRAM + PSRAM buffers)
+          apt-get install -y -q --no-install-recommends python3-cryptography
+          python3 x4prosim/tests/test_crypto.py install/qemu/bin/qemu-system-xtensa
+
       - name: Bundle Windows DLLs (${{ matrix.target }} @ ${{ matrix.platform }})
         if : ${{ matrix.platform == 'x86_64-w64-mingw32' }}
         run: |

@@ -68,6 +68,7 @@ struct GT911State {
     QEMUTimer *tap_timer;
     QEMUTimer *scan_timer;
     int64_t last_latch_ns;  /* virtual time of the last latched frame */
+    uint32_t frames;        /* frames latched, for the board state */
     qemu_irq irq;
     uint8_t regs[GT911_NREGS];
     uint16_t ptr;
@@ -101,6 +102,7 @@ static void gt911_latch(GT911State *s)
         stw_le_p(pt + 5, 0x20);     /* contact size */
     }
     s->changed = false;
+    s->frames++;
     s->last_latch_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     qemu_irq_pulse(s->irq);
 }
@@ -287,6 +289,18 @@ static void gt911_set_home(Object *obj, bool value, Error **errp)
     gt911_set_input(s, s->touch, value);
 }
 
+/* JSON for the board "state" property; "pending" = a latched frame the host has not cleared */
+static char *gt911_get_state(Object *obj, Error **errp)
+{
+    GT911State *s = GT911(obj);
+
+    return g_strdup_printf("{\"down\":%s,\"x\":%u,\"y\":%u,\"home\":%s,\"frames\":%u,"
+                           "\"pending\":%s,\"running\":%s}",
+                           s->touch ? "true" : "false", s->x, s->y, s->key ? "true" : "false",
+                           s->frames, *gt911_reg(s, GT911_STATUS) & GT911_STATUS_READY ? "true" : "false",
+                           gt911_running(s) ? "true" : "false");
+}
+
 static void gt911_load_regs(GT911State *s)
 {
     memset(s->regs, 0, sizeof(s->regs));
@@ -394,6 +408,7 @@ static void gt911_class_init(ObjectClass *klass, void *data)
     object_class_property_add_str(klass, "touch", NULL, gt911_set_touch);
     object_class_property_add_str(klass, "tap", NULL, gt911_set_tap);
     object_class_property_add_bool(klass, "home", gt911_get_home, gt911_set_home);
+    object_class_property_add_str(klass, "state", gt911_get_state, NULL);
 }
 
 static const TypeInfo gt911_info = {

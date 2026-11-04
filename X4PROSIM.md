@@ -46,7 +46,10 @@ Firmware image: any 16 MB X4 Pro flash image. Three ways to get one:
   (works only if the device doesn't use flash encryption).
 - A PlatformIO or ESP-IDF build: `x4prosim/mkflash.sh <build dir> flash.bin` merges
   `bootloader.bin`, `partitions.bin` and the app (`firmware.bin`, or the only other
-  `.bin`) at 0x0/0x8000/0x10000.
+  `.bin`) at 0x0/0x8000/0x10000. `--factory` swaps in the X4 Pro factory partition table
+  (0x7E0000 app slots, 80 KB spiffs, what the device runs) plus an otadata booting app0, for
+  OTA, slot-size and rollback tests. `--base flash.bin.run` writes the new build over a run's
+  image instead of an erased one, so NVS, otadata and the SD-independent state survive.
 - A single app `.bin` released as an OTA update: flash a bootloader and partition
   table first (from any build), then the app at 0x10000.
 
@@ -58,7 +61,10 @@ x4prosim/run.sh flash.bin sd.img          # firmware log (USB-CDC) on stdout, SD
 x4prosim/drive.py flash.bin sd.img log.txt wait:30 shot:home.png   # headless
 ```
 
-`run.sh`/`drive.py` create a 1 GB MBR+FAT32 `sd.img` if it doesn't exist (`x4prosim/mksd.py sd.img 1024 books/` copies a folder in). Keep
+`run.sh`/`drive.py` create a 1 GB MBR+FAT32 `sd.img` if it doesn't exist (`x4prosim/mksd.py sd.img 1024 books/` copies a folder in). The firmware writes
+its caches and settings into the image, so a second run starts warm. `X4SD=snapshot`
+keeps the image unchanged (every run cold, book open measured from scratch);
+`X4SD=none` boots with no card (mount retries, SD error screen).
 
 ### CrossDink build gotchas (PlatformIO, pioarduino 6.1.19)
 
@@ -124,6 +130,10 @@ Done on `x4prosim`:
     fitted to device photos: a typed-then-deleted word leaves ~11% ghost (device
     ~11%) that fades x0.53 over 6 fast refreshes (device x0.51); menus and gray
     book pages come out clean.
+  - PON/POF hold BUSY for `pon-ms`/`pof-ms` (127/82, the device's waits). TSC
+    (0x40) reads `temperature` (25 C; `qom-set /machine/peripheral/panel
+    temperature 10` at run time). Opcodes outside the UC8179 set count in
+    read-only `unknown-cmds` and log `LOG_UNIMP` (`-d unimp`).
   - Every parameter is `-global uc8179.<name>=N` and 0 turns that mechanism off:
     `swing-frames` 6, `rail-soft` 100, `otp-fast-frames` 10,
     `otp-hold-drive` 6, `remnant-fast`/`-ms` 30/1000, `remnant-slow`/`-ms`
@@ -136,6 +146,11 @@ Done on `x4prosim`:
     ~0.3 s), slow it: `-global uc8179.frame-us=100000`. A DRF during playback
     finishes the previous refresh first; RST stops it where it is.
   - Ink state is 16 B/pixel (6 MB) and the frame loop runs on QEMU's main loop.
+  - Command stream parity: `-d trace:uc8179_cmd` logs every panel command with
+    its data length and first 8 data bytes. Against a device log from firmware
+    built with `-DFREEINK_EPD_TRACE=1` (freeink-sdk EpdBus),
+    `x4prosim/epdtrace.py device.log sim.trace --from-cmd 0x00` prints both
+    streams side by side and exits 1 at the first opcode or length mismatch.
   - Measure: `test/*-steps.txt` replay a scenario with `drive.py`,
     `tools/pepmeasure.py` / `seqmeasure.py` / `hist.py` read the screenshots,
     `tools/photomeasure.py` the device photos.
@@ -149,7 +164,15 @@ Done on `x4prosim`:
 - `x4prosim/testdata/`: real device logs, the panel OTP dump, battery history to
   seed the SD card, estimated power numbers. See its README.
 - `hw/input/x4pro_keys.c`: Up/Down/Power keys (arrow keys + P, or
-  `qom-set /machine/x4pro-keys down true`).
+  `qom-set /machine/x4pro-keys down true`), and the charger STAT line GPIO21
+  (`charging`, default false = LOW; it used to float HIGH = always charging).
+- Battery / USB (X4 Pro): `qom-set /machine/soc/jtag host-connected false`
+  unplugs the USB host (SOF stops, frame counter freezes) so the firmware takes
+  its on-battery paths; the firmware then drops its own log output until the
+  host is back, as on the device. CW2017 `soc`, `soc-frac` (1/256 %),
+  `vcell-mv`, `temp-c`, and `drain-pct-per-h` (SoC per hour of guest time,
+  negative charges). `drive.py` step
+  `battery:usb=0,charging=0,soc=20,drain=360` sets any of them.
 - `hw/misc/esp32s3_rtc_cntl.c`: light sleep: `SLEEP_EN` waits for the RTC timer
   alarm or a GPIO wake, and hides the sleep from the RTC counter so esp_timer
   isn't advanced twice.
@@ -159,7 +182,12 @@ Done on `x4prosim`:
   again, `SLP_WAKEUP_CAUSE` and `EXT_WAKEUP1_STATUS` give the cause and pads. The
   GPIO model feeds GPIO0..21 to it on `rtc-pad` lines. RTC memory, the RTC counter
   (advanced by the time asleep) and the wake registers survive the reset. A timer
-  wake sleeps its length in host time. `info status` shows `paused (suspended)`
+  wake sleeps its length in host time;
+  `-global driver=misc.esp32s3.rtc_cntl,property=deep-timer-skip,value=true` wakes a
+  timer-only deep sleep at once and adds the alarm time to the RTC counter (the
+  guest's clock across the reset), so "sleep 10 min, auto wake" tests take no host
+  time. With it no pad can wake the sleep first, and the BM8563 doesn't see the
+  skipped time. `info status` shows `paused (suspended)`
   while asleep. Checked with CrossDink 1014a: Power sleeps, a short press wakes
   and re-sleeps, a held press boots to Home with `reset=DEEPSLEEP wake=EXT1`.
 - Sleep observability (same file): every sleep entry and wake is traced
@@ -177,7 +205,14 @@ Done on `x4prosim`:
   in deep sleep); `sleepmeasure.py` lists them by GPIO. CrossDink 1101b: held high
   1 2 5 14, held low/input 8 9, unheld outputs 4 11 12 13 18 19 20.
 - SD card: `x4prosim/mksd.py` makes an MBR + FAT32 image (SdFat needs the MBR);
-  the existing `dwc_sdmmc` model mounts it.
+  the existing `dwc_sdmmc` model mounts it. Size is a power of 2 MB, at least 64
+  (QEMU refuses other sizes; smaller FAT32 reads as FAT16); several folders can be
+  copied in (`mksd.py sd.img 1024 books/ settings/`); `--force` overwrites.
+- A real card as the image (reproduce a user's card): with CrossDink's USB Drive
+  on, `sudo dd if=/dev/sdX of=card.img bs=4M status=progress` (the whole disk,
+  not `sdX1`), then `truncate -s 32G card.img` up to the next power of 2. The
+  image holds settings and Wi-Fi/OPDS credentials: keep it out of git and shared
+  folders.
 - `hw/misc/esp32s3_ledc.c`: LEDC register file; each channel's output (duty or
   idle level) is latched on PARA_UP/DUTY_START and traced with the virtual time
   (`esp32s3_ledc_duty`). `uc8179` traces each refresh frame's panel mean
@@ -190,10 +225,25 @@ Done on `x4prosim`:
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+- `x4prosim/sim.py`: scripted test runner. The USB-CDC console is a socket, so steps can
+  send serial-remote commands (`cmd GOTO settings`, `cmd WAITIDLE 30000`; CrossDink
+  debug builds) and wait for log lines (`waitlog Home 240`), besides `key`, `tap X,Y`,
+  `shot NAME`, `hmp`, `wait`. Steps come from argv, `@steps.txt` or stdin; `--json`
+  prints one JSON line per step; it stops at the first failed step (exit 1). Each run
+  lives in its own DIR (log.txt, sockets, shots), so several run in parallel:
+  `x4prosim/sim.py --json flash.bin sd.img out/ "waitlog Home 240" "cmd WAITIDLE 30000" "shot home"`
+- `x4prosim/shotdiff.py shot.png golden.png [--mask X,Y,W,H] [--diff d.png]`: pixel diff
+  outside masked boxes (also `golden.mask`, one box per line). Goldens may be device
+  captures (480x800 BMP, PBM/PGM from `/api/screenshot`); `--bw` compares black/white
+  for device-vs-sim parity. Exit 1 on more than `--max` differing pixels.
 
 - GDMA (AES, SHA) uses the system address space, so guest DRAM and PSRAM addresses
   resolve. It was rooted at the DRAM region (address 0 = 0x3FC80000), every transfer
   failed, and AES-DMA left the guest spinning in `aes_hal_wait_done` on any HTTPS handshake.
+- AES-DMA CTR builds its counter blocks per AES_INC_SEL (INC32 wraps the low word without a
+  carry, as IDF's GCM expects); OFB encryption leaves the last keystream block in IV memory.
+  `x4prosim/tests/test_crypto.py` checks AES (every mode) and SHA-DMA against host AES/hashlib
+  over qtest, DRAM and PSRAM buffers (needs python `cryptography`; CI runs it).
 - Wi-Fi: the MAC is emulated with a fake AP bridged to a QEMU NIC (port of the
   lcgamboa ESP32-C3 model: `hw/misc/esp32s3_wifi.c`, `esp32_wifi_ap.c`,
   `esp32_wlan_packet.c`; analog/FE in `esp32s3_ana.c`, `esp32_fe.c`). `run.sh`
@@ -210,6 +260,43 @@ Done on `x4prosim`:
   `MasseyWifi`. With no `model=esp32_wifi` NIC the MAC is a stub and a scan finds 0.
   Station MAC: the NIC's `mac=` (default 52:54:00:12:34:56) is burned into efuse
   when no efuse file is given; give each sim on one LAN its own `mac=`.
+
+### Board state (`qom-get /machine state`)
+
+One JSON object with what scripts and live views poll, so they don't parse traces.
+HMP `qom-get /machine state` prints it as a quoted string; QMP
+`{"execute":"qom-get","arguments":{"path":"/machine","property":"state"}}` returns
+it as the string `return`. Each device part is also on its own `state` property
+(`/machine/peripheral/panel`, `/machine/gt911`, `/machine/soc/ledc` for LEDC). Keys are only ever added.
+
+```json
+{"uptime_us":18906028,"sleep":"awake",
+ "panel":{"refreshes":2,"busy":false,"animating":false,"asleep":false,
+          "last":{"t_us":2031922,"frames":10,"wave":"otp-fast"}},
+ "touch":{"down":false,"x":0,"y":0,"home":false,"frames":0,"pending":false,"running":true},
+ "keys":{"up":false,"down":false,"power":false},
+ "ledc":[[0,1024],[0,1024],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+ "battery":{"soc":80,"mv":3950}}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `uptime_us` | virtual clock (guest time under `-icount`), µs; stops in deep sleep |
+| `sleep` | `awake`, `light` (SLEEP_EN, CPU halted) or `deep` (VM suspended) |
+| `panel.refreshes` | DRF (0x12) count since power-on; changes = new picture coming |
+| `panel.busy` | BUSY_N low (refresh, PON/POF, temperature sense) |
+| `panel.animating` | refresh frames still playing on the virtual clock |
+| `panel.asleep` | deep sleep command (DSLP 0xA5) until reset |
+| `panel.last` | last refresh: start `t_us`, `frames`, `wave` = `lut` (register LUTs), `otp-fast` (inside PTIN/PTOUT) or `otp-full` |
+| `touch.down/x/y/home` | live GT911 input (480x800 portrait coordinates) |
+| `touch.frames` | frames latched since power-on; `pending` = latched, not yet read and cleared by the firmware |
+| `touch.running` | GT911 powered and out of reset |
+| `keys` | Up/Down/Power held |
+| `ledc` | `[level, max]` per LEDC channel; X4 Pro frontlight = channel 0 (cool) and 1 (warm), percent = level*100/max |
+| `battery` | CW2017 `soc` (%) and `mv` (cell voltage), settable on `/machine/cw2017` |
+
+Wait for a picture: poll until `panel.refreshes` moves past the value before the
+input and `panel.busy` and `panel.animating` are both false.
 
 Still missing: charger STAT (GPIO21 reads 1 = charging), real Wi-Fi
 (WPA, signal, other APs),
@@ -368,7 +455,7 @@ Notes:
 | RTC | **BM8563** (PCF8563-compatible) at 0x51; start date from `-rtc base=`, moved at runtime by `qom-set /machine/bm8563 offset <seconds from host time>` (sets the clock like NTP would) | on I2C | done |
 | Fuel gauge | **CW2017** at 0x63 | on I2C | done |
 | Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | duty traced (`hw/misc/esp32s3_ledc.c`), no light in the window |
-| Charger | STAT GPIO21, active-HIGH = charging | GPIO | open |
+| Charger | STAT GPIO21, active-HIGH = charging | GPIO | done (`x4pro-keys charging`) |
 | Wi-Fi | MAC + fake open AP bridged to a QEMU NIC: NAT (`-nic user`, hostfwd) or LAN (`X4BR=br0`) | n/a | done |
 | Sleep | deep sleep + ext0/ext1 GPIO wake, RTC_NOINIT/RTC_DATA memory | RTC_CNTL | done |
 

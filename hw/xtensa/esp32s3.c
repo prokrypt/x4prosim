@@ -1127,10 +1127,42 @@ static DeviceState *x4pro_add_i2c(I2CBus *bus, const char *type, uint8_t addr)
     return DEVICE(dev);
 }
 
+static char *x4pro_child_state(Object *o)
+{
+    return o ? object_property_get_str(o, "state", &error_abort) : g_strdup("null");
+}
+
+/*
+ * Board state as one JSON object (qom-get /machine state), so scripts poll one
+ * property instead of parsing traces. Schema: X4PROSIM.md "Board state".
+ */
+static char *x4pro_get_state(Object *obj, Error **errp)
+{
+    Esp32s3SocState *ss = &ESP32S3_MACHINE(obj)->esp32s3;
+    Object *keys = object_resolve_path_component(obj, "x4pro-keys");
+    Object *gauge = object_resolve_path_component(obj, "cw2017");
+    g_autofree char *panel = x4pro_child_state(object_resolve_path("/machine/peripheral/panel", NULL));
+    g_autofree char *touch = x4pro_child_state(object_resolve_path_component(obj, "gt911"));
+    g_autofree char *ledc = x4pro_child_state(object_resolve_path_component(OBJECT(ss), "ledc"));
+    const char *sleep = runstate_check(RUN_STATE_SUSPENDED) ? "deep"
+                      : ss->rtc_cntl.sleeping ? "light" : "awake";
+
+    return g_strdup_printf("{\"uptime_us\":%" PRId64 ",\"sleep\":\"%s\",\"panel\":%s,\"touch\":%s,"
+                           "\"keys\":{\"up\":%s,\"down\":%s,\"power\":%s},\"ledc\":%s,"
+                           "\"battery\":{\"soc\":%" PRIu64 ",\"mv\":%" PRIu64 "}}",
+                           qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), sleep, panel, touch,
+                           object_property_get_bool(keys, "up", &error_abort) ? "true" : "false",
+                           object_property_get_bool(keys, "down", &error_abort) ? "true" : "false",
+                           object_property_get_bool(keys, "power", &error_abort) ? "true" : "false",
+                           ledc, object_property_get_uint(gauge, "soc", &error_abort),
+                           object_property_get_uint(gauge, "vcell-mv", &error_abort));
+}
+
 /*
  * Xteink X4 Pro board: UC8179 panel on GPSPI2 (CS 13, DC 18, RST 14,
  * BUSY_N 6 through GPIO; SCLK 12 and SDA 11 also bit-banged for reads), the
- * Up/Down/Power keys (GPIO 0/7/3), and on I2C0 (SDA 39, SCL 38) the GT911
+ * Up/Down/Power keys (GPIO 0/7/3), the charger STAT line (GPIO21, driven by
+ * x4pro-keys "charging" so it no longer floats high), and on I2C0 (SDA 39, SCL 38) the GT911
  * touch (INT 10, RST 4, power enable GPIO2 active-low), BM8563 RTC and
  * CW2017 gauge.
  */
@@ -1158,6 +1190,7 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
     for (int k = 0; k < ARRAY_SIZE(key_pins); k++) {
         qdev_connect_gpio_out(keys, k, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, key_pins[k]));
     }
+    qdev_connect_gpio_out(keys, ARRAY_SIZE(key_pins), qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 21));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(keys), &error_fatal);
 
     DeviceState *i2c0 = DEVICE(object_resolve_path_component(OBJECT(ss), "i2c0"));
@@ -1169,6 +1202,7 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 2,
                                 qemu_irq_invert(qdev_get_gpio_in_named(touch, "power", 0)));
     qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 4, qdev_get_gpio_in_named(touch, "rst", 0));
+    object_property_add_str(qdev_get_machine(), "state", x4pro_get_state, NULL);
 }
 
 static void x4pro_machine_class_init(ObjectClass *oc, void *data)
