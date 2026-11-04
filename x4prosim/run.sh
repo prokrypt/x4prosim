@@ -6,13 +6,18 @@
 # Wi-Fi: the fake AP "PICSimLabWifi" is bridged to a QEMU NIC.
 #   X4BR=br0: on your LAN (router DHCP); needs "allow br0" in /usr/local/etc/qemu/bridge.conf, run as root.
 #   default: QEMU NAT (10.0.2.15), host :8080 -> device :80. X4NET overrides both.
-# Monitor: unix socket /tmp/x4prosim-mon.sock (HMP). GDB: add "-s -S".
+# Instance dir /tmp/x4prosim/$X4NAME (default: this shell's pid): mon.sock (HMP), qmp.sock (QMP,
+# for watch.py/replay.py), log.txt (copy of the firmware log). Several sims run side by side.
+# GDB: add "-s -S".
 set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
 img=$1; sd=${2:-sd.img}; shift; [ $# -gt 0 ] && shift
 [ -f "$sd" ] || python3 "$here/x4prosim/mksd.py" "$sd"
 # QEMU writes to the flash image (NVS, OTA data); run a copy to keep the source clean.
 cp "$img" "$img.run"
+dir=/tmp/x4prosim/${X4NAME:-$$}
+mkdir -p "$dir" && rm -f "$dir/mon.sock" "$dir/qmp.sock"
+echo "x4prosim: instance $dir" >&2
 chip=$(od -An -tu1 -j12 -N1 "$img" | tr -d ' ')
 : "${X4MACHINE:=$([ "$chip" = 5 ] && echo x3 || echo x4pro)}"
 if [ "$X4MACHINE" = x3 ]; then
@@ -32,7 +37,8 @@ net=${X4NET--nic user,model=esp32_wifi,hostfwd=tcp::8080-:80}
 exec "$qemu" -machine "$X4MACHINE" -icount shift=$icount_shift,sleep=on \
   -drive file="$img.run",if=mtd,format=raw \
   -drive file="$sd",if=sd,format=raw \
-  -chardev stdio,id=cdc,mux=off -serial null \
+  -chardev stdio,id=cdc,mux=off,logfile="$dir/log.txt" -serial null \
   -global driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc \
-  -monitor unix:/tmp/x4prosim-mon.sock,server,nowait -display sdl,show-cursor=on \
+  -monitor unix:"$dir/mon.sock",server,nowait -qmp unix:"$dir/qmp.sock",server,nowait \
+  -display "${X4DISPLAY:-sdl,show-cursor=on}" \
   $net "$@"
