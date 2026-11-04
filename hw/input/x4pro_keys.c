@@ -3,6 +3,7 @@
  * active low with pull-ups. Driven from the host keyboard (Up/Down arrows, P)
  * and from QOM bool properties "up", "down", "power" for scripted presses:
  *   qom-set /machine/x4pro-keys down true
+ * Each press and release is traced with the virtual time (x4pro_key).
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -14,6 +15,8 @@
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "ui/input.h"
+#include "qemu/timer.h"
+#include "trace.h"
 
 #define TYPE_X4PRO_KEYS "x4pro-keys"
 OBJECT_DECLARE_SIMPLE_TYPE(X4ProKeysState, X4PRO_KEYS)
@@ -26,8 +29,13 @@ struct X4ProKeysState {
     bool pressed[KEY_COUNT];
 };
 
+static const char *const key_names[KEY_COUNT] = { "up", "down", "power" };
+
 static void keys_set(X4ProKeysState *s, int k, bool down)
 {
+    if (down != s->pressed[k]) {
+        trace_x4pro_key(qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), key_names[k], down);
+    }
     s->pressed[k] = down;
     qemu_set_irq(s->out[k], !down);
 }

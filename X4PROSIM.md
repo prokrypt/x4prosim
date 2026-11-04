@@ -176,6 +176,10 @@ Done on `x4prosim`:
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+- Input journal: every touch/Home change (window clicks or `qom-set`) and key
+  press/release is traced with the virtual time: `gt911_input t_us=.. touch= x= y= home=`
+  and `x4pro_key t_us=.. key= down=`. Record a session by hand in the SDL window with
+  `x4prosim/run.sh flash.bin sd.img -d trace:gt911_input,trace:x4pro_key -D rec.trace`.
 
 - GDMA (AES, SHA) uses the system address space, so guest DRAM and PSRAM addresses
   resolve. It was rooted at the DRAM region (address 0 = 0x3FC80000), every transfer

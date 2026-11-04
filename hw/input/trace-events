@@ -53,3 +53,9 @@ virtio_input_queue_full(void) "queue full"
 lasips2_reg_read(unsigned int size, int id, uint64_t addr, const char *name, uint64_t val) "%u %d addr 0x%"PRIx64 "%s -> 0x%"PRIx64
 lasips2_reg_write(unsigned int size, int id, uint64_t addr, const char *name, uint64_t val) "%u %d addr 0x%"PRIx64 "%s <- 0x%"PRIx64
 lasips2_intr(unsigned int val) "%d"
+
+# gt911.c
+gt911_input(int64_t t_us, int touch, int x, int y, int home) "t_us=%" PRId64 " touch=%d x=%d y=%d home=%d"
+
+# x4pro_keys.c
+x4pro_key(int64_t t_us, const char *key, int down) "t_us=%" PRId64 " key=%s down=%d"

@@ -16,6 +16,9 @@
  * the INT wake pulse is invisible here, and the address is fixed rather than
  * strapped by INT at reset.
  *
+ * Every input change, from the window or a script, is traced with the virtual
+ * time (gt911_input) so a session can be recorded and replayed.
+ *
  * Input is in the controller's own coordinates, 480x800 portrait (X right, Y
  * down), which is how the x4pro panel console shows the screen. Sources: an
  * absolute pointer (left button = finger, right = Home), and write-only
@@ -39,6 +42,7 @@
 #include "hw/irq.h"
 #include "hw/qdev-core.h"
 #include "ui/input.h"
+#include "trace.h"
 
 #define TYPE_GT911 "gt911"
 OBJECT_DECLARE_SIMPLE_TYPE(GT911State, GT911)
@@ -78,6 +82,8 @@ struct GT911State {
     uint16_t x;
     uint16_t y;
     bool changed;       /* live input differs from the latched frame */
+    bool j_touch, j_key;    /* input as last journaled (trace gt911_input) */
+    uint16_t j_x, j_y;
     /* wire levels, not reset with the device */
     bool power;
     bool rst;
@@ -130,11 +136,26 @@ static void gt911_scan(void *opaque)
     gt911_kick(opaque);
 }
 
+/* Input journal: one trace line per change from any source, for record/replay. */
+static void gt911_journal(GT911State *s)
+{
+    if (s->touch == s->j_touch && s->key == s->j_key &&
+        (!s->touch || (s->x == s->j_x && s->y == s->j_y))) {
+        return;
+    }
+    s->j_touch = s->touch;
+    s->j_key = s->key;
+    s->j_x = s->x;
+    s->j_y = s->y;
+    trace_gt911_input(qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), s->touch, s->x, s->y, s->key);
+}
+
 static void gt911_set_input(GT911State *s, bool touch, bool key)
 {
     s->touch = touch;
     s->key = key;
     s->changed = true;
+    gt911_journal(s);
     gt911_kick(s);
 }
 
@@ -220,6 +241,7 @@ static void gt911_input_event(DeviceState *dev, QemuConsole *src, InputEvent *ev
 
 static void gt911_input_sync(DeviceState *dev)
 {
+    gt911_journal(GT911(dev));
     gt911_kick(GT911(dev));
 }
 
