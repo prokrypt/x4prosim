@@ -3,7 +3,8 @@
  *
  * Registers 0x00-0x0F with the PCF8563 auto-incrementing pointer. The time
  * registers 0x02-0x08 (VL_seconds .. years, century bit in months) follow the
- * host clock plus an offset that guest writes move; the time is latched on
+ * -rtc clock (host time by default; -rtc base=<date>,clock=vm pins it to guest
+ * time) plus an offset that guest writes move; the time is latched on
  * every START so a burst read is coherent. VL starts clear so the time reads
  * as valid. Control, alarm, CLKOUT and timer registers are plain storage: no
  * alarm/timer interrupts, no STOP bit, no CLKOUT. Battery-backed, so an SoC
@@ -71,7 +72,12 @@ static void bm8563_commit_time(BM8563State *s)
     };
     struct tm now;
 
-    s->offset = qemu_timedate_diff(&tm);
+    /*
+     * Offset from the -rtc clock as it reads now, not from host time
+     * (qemu_timedate_diff's reference), so clock=vm keeps a written time too.
+     */
+    qemu_get_timedate(&now, 0);
+    s->offset = qemu_timedate_diff(&tm) - qemu_timedate_diff(&now);
     qemu_get_timedate(&now, s->offset);
     s->wday_offset = ((s->regs[BM8563_WEEKDAYS] & 7) + 7 - now.tm_wday) % 7;
 }
@@ -125,7 +131,7 @@ static int bm8563_send(I2CSlave *i2c, uint8_t data)
     return 0;
 }
 
-/* qom-set /machine/bm8563 offset <seconds from host time> sets the clock without NTP. */
+/* qom-set /machine/bm8563 offset <seconds from the -rtc clock> sets the clock without NTP. */
 static void bm8563_instance_init(Object *obj)
 {
     BM8563State *s = BM8563(obj);

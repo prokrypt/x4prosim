@@ -351,7 +351,7 @@ Notes:
 | Buttons | active-LOW, pull-up; Up 0 (strap), Down 7, Power 3 | GPIO | done |
 | **I2C bus** | **ESP32-S3 I2C0 controller, 400 kHz** | **SDA 39, SCL 38** | done |
 | Touch | **GT911** at 0x5D (alt 0x14), INT 10, RST 4, power-enable GPIO2 active-LOW; reports X 0..480, Y 0..800 (portrait, firmware swaps XY and flips Y); has a capacitive Home key | on I2C | done |
-| RTC | **BM8563** (PCF8563-compatible) at 0x51; start date from `-rtc base=`, moved at runtime by `qom-set /machine/bm8563 offset <seconds from host time>` (sets the clock like NTP would) | on I2C | done |
+| RTC | **BM8563** (PCF8563-compatible) at 0x51; start date from `-rtc base=`, moved at runtime by `qom-set /machine/bm8563 offset <seconds from the -rtc clock>` (sets the clock like NTP would); `-rtc base=2026-01-01T00:00:00,clock=vm` pins it to guest time for repeatable runs (every boot reads the same date; deep sleep and `deep-timer-skip` time doesn't count) | on I2C | done |
 | Fuel gauge | **CW2017** at 0x63 | on I2C | done |
 | Frontlight | LEDC PWM 25 kHz 10-bit, cool GPIO8 (ch4), warm GPIO9 (ch5) | LEDC | duty traced (`hw/misc/esp32s3_ledc.c`), no light in the window |
 | Charger | STAT GPIO21, active-HIGH = charging | GPIO | open |
