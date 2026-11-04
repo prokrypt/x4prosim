@@ -111,6 +111,13 @@ typedef struct Esp32s3RtcCntlState {
     uint32_t pad_level;         /* RTC GPIO 0..21 (= GPIO0..21) input levels */
     int64_t deep_start_rt_ns;
     QEMUTimer deep_timer;       /* realtime: the virtual clock stops while suspended */
+    bool deep_timer_skip;       /* property: a timer-only deep sleep ends at once */
+    int64_t deep_skipped_ns;    /* alarm time credited to the RTC counter by the skip */
+
+    /* x4prosim: sleep counters (read-only QOM properties) */
+    uint32_t light_sleeps;
+    uint64_t light_sleep_us;    /* virtual time spent in light sleep */
+    uint32_t deep_sleeps;
 } Esp32s3RtcCntlState;
 
 #define ESP32S3_RTC_GPIO_WAKE "gpio-wake"

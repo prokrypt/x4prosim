@@ -60,6 +60,9 @@ Up/Down/Power/Home buttons.
 x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png \
   "hmp:qom-set /machine/gt911 tap 240,529" wait:5 shot:settings.png
 ```
+Test scripts (serial-remote commands, log waits, JSON output, parallel instances) use
+`x4prosim/sim.py`; `x4prosim/shotdiff.py` diffs screenshots against goldens with masks.
+See X4PROSIM.md.
 
 ## What's emulated
 

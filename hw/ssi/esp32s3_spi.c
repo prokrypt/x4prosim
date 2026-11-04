@@ -212,18 +212,13 @@ static inline void esp32s3_spi_get_addr(ESP32S3SpiState *s, uint32_t* addr, uint
 
 static inline void esp32s3_spi_get_dummy(ESP32S3SpiState *s, uint32_t* len)
 {
-    const uint32_t dummy_count = FIELD_EX32(s->mem_user1, SPI_MEM_USER1, USR_DUMMY_CYCLELEN);
-
-    /* Dummy cycles are interpreted as bytes by the emulated SPI Flash. As such, we shall convert
-     * our dummy cycles count in bytes, rounding it up. For example:
-     * 0 cycles = 0 byte
-     * 1 cycle = 1 byte
-     * ...
-     * 8 cycles = 1 byte
-     * 9 cycles = 2 bytes
-     * etc..
-     */
-    *len = (dummy_count + 7) / 8;
+    /* USR_DUMMY_CYCLELEN holds cycles - 1. In FREAD_QIO/FREAD_DIO the dummy phase is clocked on the
+     * 4/2 address lines; the emulated flash counts dummy bytes (m25p80 ISSI: QIO 0xEB 6 cycles = 3
+     * bytes, DIO 0xBB 4 cycles = 1 byte, FASTRD 8 cycles = 1 byte). */
+    const uint32_t cycles = FIELD_EX32(s->mem_user1, SPI_MEM_USER1, USR_DUMMY_CYCLELEN) + 1;
+    const uint32_t lines = FIELD_EX32(s->mem_ctrl, SPI_MEM_CTRL, FREAD_QIO) ? 4 :
+                           FIELD_EX32(s->mem_ctrl, SPI_MEM_CTRL, FREAD_DIO) ? 2 : 1;
+    *len = (cycles * lines + 7) / 8;
 }
 
 static void esp32s3_spi_begin_transaction(ESP32S3SpiState *s)

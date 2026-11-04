@@ -3,13 +3,17 @@
  *
  * A 0x60-byte register file with an auto-incrementing pointer. Live
  * registers: VERSION 0x00 (0x0D while MODE is 0x00 "running", 0xA0 otherwise),
- * VCELL 0x02/0x03 (14-bit, 5/16 mV per LSB), SOC 0x04/0x05 and TEMP 0x06
- * (fixed 25 C). MODE 0x08, SOC_ALERT 0x0B and the BATINFO profile 0x10-0x5F
- * are plain storage, so the driver's profile upload and soft reset are
- * accepted. SOC reads 0 until a profile is flagged loaded (SOC_ALERT bit 7)
- * and the gauge is running, as on the chip after power-up. No fuel-gauge
- * algorithm: SoC and voltage come from the "soc" (percent) and "vcell-mv"
- * properties, settable with -global or at runtime with qom-set.
+ * VCELL 0x02/0x03 (14-bit, 5/16 mV per LSB), SOC 0x04/0x05 (percent and
+ * 1/256 %) and TEMP 0x06 (0.5 C per LSB, -40 C offset). MODE 0x08,
+ * SOC_ALERT 0x0B and the BATINFO profile 0x10-0x5F are plain storage, so the
+ * driver's profile upload and soft reset are accepted. SOC reads 0 until a
+ * profile is flagged loaded (SOC_ALERT bit 7) and the gauge is running, as on
+ * the chip after power-up. No fuel-gauge algorithm: SoC, voltage and
+ * temperature come from the "soc" (percent), "soc-frac" (1/256 %), "vcell-mv"
+ * and "temp-c" properties, settable with -global or at runtime with
+ * qom-set /machine/cw2017 ... A nonzero "drain-pct-per-h" moves SoC by that
+ * many percent per hour of virtual time (negative charges), clamped to
+ * 0..100; VCELL stays where it was set.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -18,6 +22,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
+#include "qapi/visitor.h"
 #include "hw/i2c/i2c.h"
 #include "qom/object.h"
 
@@ -43,14 +49,42 @@ struct CW2017State {
     uint8_t ptr;
     bool ptr_next;      /* next byte written is the register pointer */
     uint8_t soc;
+    uint8_t soc_frac;
     uint16_t vcell_mv;
+    int32_t temp_c;
+    int32_t drain;      /* percent per hour, negative charges */
+    int64_t drain_ns;   /* virtual time the drain is accounted up to */
 };
+
+#define CW2017_FULL         (100 * 256)
+#define NS_PER_H            (3600 * NANOSECONDS_PER_SECOND)
+
+/* Move soc/soc_frac by the drain since drain_ns, keeping the sub-LSB rest. */
+static void cw2017_drain(CW2017State *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t per_lsb, lsbs, level;
+
+    if (!s->drain) {
+        s->drain_ns = now;
+        return;
+    }
+    per_lsb = NS_PER_H / (ABS((int64_t)s->drain) * 256);
+    lsbs = (now - s->drain_ns) / per_lsb;
+    s->drain_ns += lsbs * per_lsb;
+    level = MIN(s->soc * 256 + s->soc_frac, CW2017_FULL);
+    level -= s->drain > 0 ? lsbs : -lsbs;
+    level = MAX(MIN(level, CW2017_FULL), 0);
+    s->soc = level / 256;
+    s->soc_frac = level % 256;
+}
 
 static uint8_t cw2017_reg(CW2017State *s, uint8_t reg)
 {
     bool running = s->regs[CW2017_MODE] == 0;
     uint32_t vcell = MIN(s->vcell_mv * 16 / 5, 0x3fff);
 
+    cw2017_drain(s);
     switch (reg) {
     case CW2017_VERSION:
         return running ? 0x0d : 0xa0;
@@ -62,9 +96,10 @@ static uint8_t cw2017_reg(CW2017State *s, uint8_t reg)
         return running && (s->regs[CW2017_SOC_ALERT] & CW2017_PROFILE_SET) ?
                MIN(s->soc, 100) : 0;
     case CW2017_SOC_FRAC:
-        return 0;
+        return running && (s->regs[CW2017_SOC_ALERT] & CW2017_PROFILE_SET) &&
+               s->soc < 100 ? s->soc_frac : 0;
     case CW2017_TEMP:
-        return (25 + 40) * 2;
+        return MAX(MIN((s->temp_c + 40) * 2, 255), 0);
     default:
         return reg < CW2017_NREGS ? s->regs[reg] : 0;
     }
@@ -103,6 +138,23 @@ static int cw2017_send(I2CSlave *i2c, uint8_t data)
     return 0;
 }
 
+static void cw2017_get_int(Object *obj, Visitor *v, const char *name,
+                           void *opaque, Error **errp)
+{
+    visit_type_int32(v, name, opaque, errp);
+}
+
+static void cw2017_set_int(Object *obj, Visitor *v, const char *name,
+                           void *opaque, Error **errp)
+{
+    int32_t val;
+
+    if (visit_type_int32(v, name, &val, errp)) {
+        cw2017_drain(CW2017(obj));  /* settle the old rate up to now */
+        *(int32_t *)opaque = val;
+    }
+}
+
 static void cw2017_init(Object *obj)
 {
     CW2017State *s = CW2017(obj);
@@ -111,8 +163,13 @@ static void cw2017_init(Object *obj)
     s->regs[CW2017_MODE] = CW2017_MODE_POR;
     s->soc = 80;
     s->vcell_mv = 3950;
+    s->temp_c = 25;
     object_property_add_uint8_ptr(obj, "soc", &s->soc, OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint8_ptr(obj, "soc-frac", &s->soc_frac, OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint16_ptr(obj, "vcell-mv", &s->vcell_mv, OBJ_PROP_FLAG_READWRITE);
+    object_property_add(obj, "temp-c", "int32", cw2017_get_int, cw2017_set_int, NULL, &s->temp_c);
+    object_property_add(obj, "drain-pct-per-h", "int32", cw2017_get_int, cw2017_set_int, NULL,
+                        &s->drain);
 }
 
 static void cw2017_class_init(ObjectClass *klass, void *data)

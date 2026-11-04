@@ -2,9 +2,13 @@
  * ESP32-S3 USB Serial/JTAG controller: CDC serial side only.
  *
  * Bytes the firmware writes to EP1 go to the "chardev" backend; bytes from the
- * backend are readable from EP1. The SOF status bit always reads as set, a
- * 1 kHz SOF interrupt ticks and the frame counter follows virtual time, so
- * Arduino's HWCDC and IDF's plug watchdog always see a connected host.
+ * backend are readable from EP1. While "host-connected" is true (default) the
+ * SOF status bit always reads as set, a 1 kHz SOF interrupt ticks and the
+ * frame counter follows virtual time, so Arduino's HWCDC and IDF's plug
+ * watchdog see a connected host. Set it false (-global or at runtime with
+ *   qom-set /machine/soc/jtag host-connected false
+ * ) to unplug the cable: SOF stops and the frame counter freezes, so firmware
+ * takes its on-battery paths. Output still reaches the chardev.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -53,7 +57,8 @@ struct Esp32s3UsbJtagState {
     Fifo8 rx;
     uint32_t int_raw;
     uint32_t int_ena;
-    uint32_t frame;
+    uint32_t frame;     /* frame counter, frozen while unplugged */
+    bool host;
 };
 
 /*
@@ -63,11 +68,16 @@ struct Esp32s3UsbJtagState {
  * found it clear. QEMU can run several ticks inside one virtual millisecond
  * (bunched timer deadlines), so a SOF that only came from the 1 ms timer went
  * missing often enough that Arduino's HWCDC marked the link down and cut a
- * 52 KB screenshot write to its 256-byte ring. Unplugging isn't modeled.
+ * 52 KB screenshot write to its 256-byte ring.
  */
 static uint32_t usb_jtag_sof_pending(Esp32s3UsbJtagState *s)
 {
-    return INT_SOF;
+    return s->host ? INT_SOF : 0;
+}
+
+static uint32_t usb_jtag_frame(Esp32s3UsbJtagState *s)
+{
+    return s->host ? qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) & 0x7ff : s->frame;
 }
 
 static void usb_jtag_update_irq(Esp32s3UsbJtagState *s)
@@ -109,7 +119,7 @@ static uint64_t usb_jtag_read(void *opaque, hwaddr addr, unsigned int size)
          * guest's plug watchdog samples it every tick and would see a stalled
          * counter whenever the main loop lagged, then drop its TX ring.
          */
-        r = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) & 0x7ff;
+        r = usb_jtag_frame(s);
         break;
     case R_DATE:
         r = 0x2101200;
@@ -154,7 +164,6 @@ static const MemoryRegionOps usb_jtag_ops = {
 static void usb_jtag_sof(void *opaque)
 {
     Esp32s3UsbJtagState *s = opaque;
-    s->frame++;
     s->int_raw |= INT_SOF;
     usb_jtag_update_irq(s);
     timer_mod(&s->sof_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
@@ -178,9 +187,32 @@ static void usb_jtag_reset_hold(Object *obj, ResetType type)
     Esp32s3UsbJtagState *s = ESP32S3_USB_JTAG(obj);
     s->int_raw = INT_IN_EMPTY;
     s->int_ena = 0;
-    s->frame = 0;
     fifo8_reset(&s->rx);
-    timer_mod(&s->sof_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+    if (s->host) {
+        timer_mod(&s->sof_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+    }
+}
+
+static bool usb_jtag_get_host(Object *obj, Error **errp)
+{
+    return ESP32S3_USB_JTAG(obj)->host;
+}
+
+static void usb_jtag_set_host(Object *obj, bool host, Error **errp)
+{
+    Esp32s3UsbJtagState *s = ESP32S3_USB_JTAG(obj);
+
+    if (host == s->host) {
+        return;
+    }
+    s->frame = usb_jtag_frame(s);
+    s->host = host;
+    if (host) {
+        timer_mod(&s->sof_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+    } else {
+        /* A latched SOF stays set until the guest clears it, as on the chip. */
+        timer_del(&s->sof_timer);
+    }
 }
 
 static void usb_jtag_realize(DeviceState *dev, Error **errp)
@@ -200,6 +232,8 @@ static void usb_jtag_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
     fifo8_create(&s->rx, RX_FIFO_SIZE);
     timer_init_ms(&s->sof_timer, QEMU_CLOCK_VIRTUAL, usb_jtag_sof, s);
+    s->host = true;
+    object_property_add_bool(obj, "host-connected", usb_jtag_get_host, usb_jtag_set_host);
 }
 
 static Property usb_jtag_properties[] = {
