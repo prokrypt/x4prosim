@@ -974,6 +974,8 @@ static void esp32s3_machine_init(MachineState *machine)
                 ESP32_WIFI(d)->macaddr[i] = m[5 - i];
             }
             qdev_set_nic_properties(d, nd);
+            /* x4prosim: a fixed path for "qom-get /machine/wifi state" */
+            object_property_add_child(qdev_get_machine(), "wifi", OBJECT(d));
             sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
             memory_region_add_subregion_overlap(sys_mem, 0x60033000,
                                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(d), 0), 2);

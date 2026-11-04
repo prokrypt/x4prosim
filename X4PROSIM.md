@@ -255,6 +255,10 @@ Done on `x4prosim`:
   `MasseyWifi`. With no `model=esp32_wifi` NIC the MAC is a stub and a scan finds 0.
   Station MAC: the NIC's `mac=` (default 52:54:00:12:34:56) is burned into efuse
   when no efuse file is given; give each sim on one LAN its own `mac=`.
+  State: `qom-get /machine/wifi state` (HMP) returns one JSON line (mode, state,
+  associated, channel, mac, bssid, rx_dma, tx/rx/dropped frame counts since reset).
+  `x4prosim/wifi-timeline.py LOG [LOG...]` lines up join/assoc/IP/NTP/server times of a
+  sim log next to a device log (the NTP 5 s block is a sim/sandbox artefact).
 
 ### Board state (`qom-get /machine state`)
 

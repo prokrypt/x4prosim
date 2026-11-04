@@ -148,10 +148,12 @@ static int match_mac_address(uint8_t *a1,uint8_t *a2) {
 }
 // frame from ap to esp32
 void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int signal_strength) {    
-    if(s->dma_inlink_address==0) return;
     // Bit 31 of DMA_IN_STATUS is RX DMA enable: esp_wifi_stop() clears it and
     // then frees the descriptor ring, so DMA past that point corrupts the heap.
-    if(!(s->mem[R_S3_WIFI_DMA_IN_STATUS] & 0x80000000)) return;
+    if(s->dma_inlink_address==0 || !(s->mem[R_S3_WIFI_DMA_IN_STATUS] & 0x80000000)) {
+        s->rx_dropped++;
+        return;
+    }
     uint8_t *header=malloc(sizeof(wifi_pkt_rx_ctrl_c3_t)+length);
     memset(header,0,sizeof(wifi_pkt_rx_ctrl_c3_t)+length);
     wifi_pkt_rx_ctrl_c3_t *pkt=(wifi_pkt_rx_ctrl_c3_t *)header;
@@ -184,9 +186,11 @@ void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int si
     address_space_read(&address_space_memory, s->dma_inlink_ptr, MEMTXATTRS_UNSPECIFIED, &item, 12);
     // Real hardware never writes a descriptor software owns, or past its buffer.
     if(!item.owner || length > item.size) {
+        s->rx_dropped++;
         free(header);
         return;
     }
+    s->rx_frames++;
     address_space_write(&address_space_memory, item.address, MEMTXATTRS_UNSPECIFIED, header, length);
     item.length=length;
     item.eof=1;
@@ -210,6 +214,7 @@ static void esp32s3_wifi_reset_enter(Object *obj, ResetType type)
     s->dma_inlink_address=0;
     s->dma_inlink_ptr=0;
     memset(s->mem,0,sizeof(s->mem));
+    s->tx_frames = s->rx_frames = s->rx_dropped = 0;
     Esp32_WLAN_reset_ap(s);
 }
 
@@ -228,6 +233,31 @@ static void esp32s3_wifi_realize(DeviceState *dev, Error **errp)
     Esp32_WLAN_setup_ap(dev, s);
     
 }
+/* x4prosim: qom-get .../wifi state -> one JSON line, so tests can assert "associated" without
+ * grepping the firmware log. */
+static char *esp32s3_wifi_get_state(Object *obj, Error **errp)
+{
+    static const char *const names[] = {
+        "NOT_AUTHENTICATED", "AUTHENTICATED", "ASSOCIATED",
+        "STA_NOT_AUTHENTICATED", "STA_AUTHENTICATED", "STA_ASSOCIATED", "STA_DHCP",
+    };
+    Esp32WifiState *s = ESP32_WIFI(obj);
+    const uint8_t *m = s->macaddr, *b = s->associated_ap_macaddr;
+    const bool assoc = s->ap_state == Esp32_WLAN__STATE_ASSOCIATED ||
+                       s->ap_state == Esp32_WLAN__STATE_STA_ASSOCIATED ||
+                       s->ap_state == Esp32_WLAN__STATE_STA_DHCP;
+    return g_strdup_printf("{\"mode\":\"%s\",\"state\":\"%s\",\"associated\":%s,\"channel\":%d,"
+                           "\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
+                           "\"bssid\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"rx_dma\":%s,"
+                           "\"tx_frames\":%" PRIu64 ",\"rx_frames\":%" PRIu64 ",\"rx_dropped\":%" PRIu64 "}",
+                           s->mode == Esp32_Mode_SoftAP ? "softap" : "sta",
+                           s->ap_state < ARRAY_SIZE(names) ? names[s->ap_state] : "?",
+                           assoc ? "true" : "false", esp32_wifi_channel,
+                           m[0], m[1], m[2], m[3], m[4], m[5], b[0], b[1], b[2], b[3], b[4], b[5],
+                           (s->mem[R_S3_WIFI_DMA_IN_STATUS] & 0x80000000) ? "true" : "false",
+                           s->tx_frames, s->rx_frames, s->rx_dropped);
+}
+
 static Property esp32s3_wifi_properties[] = {
     DEFINE_NIC_PROPERTIES(Esp32WifiState, conf),
     DEFINE_PROP_END_OF_LIST(),
@@ -242,6 +272,7 @@ static void esp32s3_wifi_class_init(ObjectClass *klass, void *data)
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "ESP32-S3 Wi-Fi MAC";
     device_class_set_props(dc, esp32s3_wifi_properties);
+    object_class_property_add_str(klass, "state", esp32s3_wifi_get_state, NULL);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
     resettable_class_set_parent_phases(rc, esp32s3_wifi_reset_enter, NULL, NULL, &rp);
 }
