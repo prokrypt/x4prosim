@@ -58,7 +58,10 @@ x4prosim/run.sh flash.bin sd.img          # firmware log (USB-CDC) on stdout, SD
 x4prosim/drive.py flash.bin sd.img log.txt wait:30 shot:home.png   # headless
 ```
 
-`run.sh`/`drive.py` create a 1 GB MBR+FAT32 `sd.img` if it doesn't exist (`x4prosim/mksd.py sd.img 1024 books/` copies a folder in). Keep
+`run.sh`/`drive.py` create a 1 GB MBR+FAT32 `sd.img` if it doesn't exist (`x4prosim/mksd.py sd.img 1024 books/` copies a folder in). The firmware writes
+its caches and settings into the image, so a second run starts warm. `X4SD=snapshot`
+keeps the image unchanged (every run cold, book open measured from scratch);
+`X4SD=none` boots with no card (mount retries, SD error screen).
 
 ### CrossDink build gotchas (PlatformIO, pioarduino 6.1.19)
 

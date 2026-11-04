@@ -6,10 +6,15 @@
 # Wi-Fi: the fake AP "PICSimLabWifi" is bridged to a QEMU NIC.
 #   X4BR=br0: on your LAN (router DHCP); needs "allow br0" in /usr/local/etc/qemu/bridge.conf, run as root.
 #   default: QEMU NAT (10.0.2.15), host :8080 -> device :80. X4NET overrides both.
+# SD: X4SD=snapshot discards the run's SD writes (cold caches every run); X4SD=none boots with no card.
 # Monitor: unix socket /tmp/x4prosim-mon.sock (HMP). GDB: add "-s -S".
 set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
 img=$1; sd=${2:-sd.img}; shift; [ $# -gt 0 ] && shift
+case ${X4SD-} in
+  "") sdopt=if=sd ;; snapshot) sdopt=if=sd,snapshot=on ;; none) sdopt=if=none ;;
+  *) echo "x4prosim: X4SD=snapshot|none" >&2; exit 2 ;;
+esac
 [ -f "$sd" ] || python3 "$here/x4prosim/mksd.py" "$sd"
 # QEMU writes to the flash image (NVS, OTA data); run a copy to keep the source clean.
 cp "$img" "$img.run"
@@ -31,7 +36,7 @@ net=${X4NET--nic user,model=esp32_wifi,hostfwd=tcp::8080-:80}
 # X3 costs are nanoseconds: one icount tick is 1 ns; Xtensa keeps 4 ns ticks.
 exec "$qemu" -machine "$X4MACHINE" -icount shift=$icount_shift,sleep=on \
   -drive file="$img.run",if=mtd,format=raw \
-  -drive file="$sd",if=sd,format=raw \
+  -drive file="$sd",$sdopt,format=raw \
   -chardev stdio,id=cdc,mux=off -serial null \
   -global driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc \
   -monitor unix:/tmp/x4prosim-mon.sock,server,nowait -display sdl,show-cursor=on \
