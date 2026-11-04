@@ -1,11 +1,12 @@
 /*
- * Goodix GT911 capacitive touch controller (single contact + Home key)
+ * Goodix GT911 capacitive touch controller (up to 5 contacts + Home key)
  *
  * 16-bit register pointer, big-endian on the wire, auto-incrementing.
  * Models the command/config block 0x8040-0x8100 as storage, the read-only
  * product ID/resolution block at 0x8140, buffer status 0x814E (bit 7 frame
  * ready, bit 4 key down, low nibble contact count; a host write clears it)
- * and the first 8-byte point record 0x814F-0x8156. A new frame is latched when
+ * and the five 8-byte point records from 0x814F (track id, X, Y, size; the
+ * track id is the contact's index in the script's list). A new frame is latched when
  * input changes and the previous one has been cleared, and again after every
  * clear while a contact or the key is held, at most once per 10 ms (the
  * chip's default 100 Hz report rate). "int" idles low and pulses high
@@ -20,9 +21,12 @@
  * down), which is how the x4pro panel console shows the screen. Sources: an
  * absolute pointer (left button = finger, right = Home), and write-only
  * properties for scripts:
- *   qom-set <path> touch X,Y | up     press/move, or lift
+ *   qom-set <path> touch X,Y[;X,Y...] | up   press/move up to 5 contacts, or lift all
  *   qom-set <path> tap X,Y | home     100 ms tap on the screen or Home key
  *   qom-set <path> home on | off      hold or release Home
+ * Read-only counters let scripts hold input until the guest has seen it:
+ * "input-seq" counts input changes, "read-seq" is the input-seq of the last
+ * frame the guest cleared (read); read-seq >= input-seq means nothing pending.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -56,6 +60,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(GT911State, GT911)
 #define GT911_STATUS_READY  0x80
 #define GT911_STATUS_KEY    0x10
 
+#define GT911_MAX_POINTS    5
 #define GT911_RES_X         480
 #define GT911_RES_Y         800
 #define GT911_TAP_MS        100
@@ -73,11 +78,14 @@ struct GT911State {
     uint16_t ptr;
     int addr_bytes;     /* register address bytes still to come */
     /* live input */
-    bool touch;
+    uint8_t npts;       /* contacts down */
     bool key;
-    uint16_t x;
-    uint16_t y;
+    uint16_t x[GT911_MAX_POINTS];
+    uint16_t y[GT911_MAX_POINTS];
     bool changed;       /* live input differs from the latched frame */
+    uint32_t input_seq;     /* bumped on every input change */
+    uint32_t latched_seq;   /* input_seq of the frame in the registers */
+    uint32_t read_seq;      /* input_seq of the last frame the guest cleared */
     /* wire levels, not reset with the device */
     bool power;
     bool rst;
@@ -93,14 +101,16 @@ static void gt911_latch(GT911State *s)
     uint8_t *pt = gt911_reg(s, GT911_POINT1);
 
     *gt911_reg(s, GT911_STATUS) = GT911_STATUS_READY |
-                                  (s->key ? GT911_STATUS_KEY : 0) | s->touch;
-    memset(pt, 0, 8);
-    if (s->touch) {
-        stw_le_p(pt + 1, s->x);
-        stw_le_p(pt + 3, s->y);
+                                  (s->key ? GT911_STATUS_KEY : 0) | s->npts;
+    memset(pt, 0, 8 * GT911_MAX_POINTS);
+    for (int i = 0; i < s->npts; i++, pt += 8) {
+        pt[0] = i;                  /* track id */
+        stw_le_p(pt + 1, s->x[i]);
+        stw_le_p(pt + 3, s->y[i]);
         stw_le_p(pt + 5, 0x20);     /* contact size */
     }
     s->changed = false;
+    s->latched_seq = s->input_seq;
     s->last_latch_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     qemu_irq_pulse(s->irq);
 }
@@ -130,19 +140,23 @@ static void gt911_scan(void *opaque)
     gt911_kick(opaque);
 }
 
-static void gt911_set_input(GT911State *s, bool touch, bool key)
+static void gt911_set_input(GT911State *s, uint8_t npts, bool key)
 {
-    s->touch = touch;
+    s->npts = npts;
     s->key = key;
     s->changed = true;
+    s->input_seq++;
     gt911_kick(s);
 }
 
 static void gt911_write_reg(GT911State *s, uint16_t reg, uint8_t val)
 {
     if (reg == GT911_STATUS) {
+        if (*gt911_reg(s, GT911_STATUS) & GT911_STATUS_READY) {
+            s->read_seq = s->latched_seq;
+        }
         *gt911_reg(s, GT911_STATUS) = 0;
-        s->changed |= s->touch || s->key;
+        s->changed |= s->npts || s->key;
         gt911_kick(s);
     } else if (reg >= GT911_COMMAND && reg <= GT911_CONFIG_FRESH) {
         *gt911_reg(s, reg) = val;
@@ -195,22 +209,27 @@ static void gt911_input_event(DeviceState *dev, QemuConsole *src, InputEvent *ev
     case INPUT_EVENT_KIND_ABS:
         move = evt->u.abs.data;
         if (move->axis == INPUT_AXIS_X) {
-            s->x = qemu_input_scale_axis(move->value, INPUT_EVENT_ABS_MIN,
-                                         INPUT_EVENT_ABS_MAX, 0, GT911_RES_X - 1);
+            s->x[0] = qemu_input_scale_axis(move->value, INPUT_EVENT_ABS_MIN,
+                                            INPUT_EVENT_ABS_MAX, 0, GT911_RES_X - 1);
         } else if (move->axis == INPUT_AXIS_Y) {
-            s->y = qemu_input_scale_axis(move->value, INPUT_EVENT_ABS_MIN,
-                                         INPUT_EVENT_ABS_MAX, 0, GT911_RES_Y - 1);
+            s->y[0] = qemu_input_scale_axis(move->value, INPUT_EVENT_ABS_MIN,
+                                            INPUT_EVENT_ABS_MAX, 0, GT911_RES_Y - 1);
         }
-        s->changed |= s->touch;
+        if (s->npts) {
+            s->changed = true;
+            s->input_seq++;
+        }
         break;
     case INPUT_EVENT_KIND_BTN:
         btn = evt->u.btn.data;
-        if (btn->button == INPUT_BUTTON_LEFT && btn->down != s->touch) {
-            s->touch = btn->down;
+        if (btn->button == INPUT_BUTTON_LEFT && btn->down != (s->npts > 0)) {
+            s->npts = btn->down;
             s->changed = true;
+            s->input_seq++;
         } else if (btn->button == INPUT_BUTTON_RIGHT && btn->down != s->key) {
             s->key = btn->down;
             s->changed = true;
+            s->input_seq++;
         }
         break;
     default:
@@ -230,40 +249,54 @@ static const QemuInputHandler gt911_input_handler = {
     .sync = gt911_input_sync,
 };
 
-static bool gt911_parse_point(GT911State *s, const char *str, Error **errp)
+/* "X,Y[;X,Y...]" into the live contacts; returns their count, 0 on error. */
+static int gt911_parse_points(GT911State *s, const char *str, Error **errp)
 {
-    unsigned x, y;
-    char end;
+    uint16_t x[GT911_MAX_POINTS] = { 0 }, y[GT911_MAX_POINTS] = { 0 };
+    int n = 0;
 
-    if (sscanf(str, "%u,%u%c", &x, &y, &end) != 2 ||
-        x >= GT911_RES_X || y >= GT911_RES_Y) {
-        error_setg(errp, "expected X,Y with X < %d and Y < %d", GT911_RES_X, GT911_RES_Y);
-        return false;
+    for (;;) {
+        unsigned px, py;
+        int len = 0;
+
+        if (n == GT911_MAX_POINTS || sscanf(str, "%u,%u%n", &px, &py, &len) != 2 ||
+            px >= GT911_RES_X || py >= GT911_RES_Y || (str[len] && str[len] != ';')) {
+            error_setg(errp, "expected up to %d X,Y separated by ';' "
+                       "with X < %d and Y < %d",
+                       GT911_MAX_POINTS, GT911_RES_X, GT911_RES_Y);
+            return 0;
+        }
+        x[n] = px;
+        y[n++] = py;
+        if (!str[len]) {
+            break;
+        }
+        str += len + 1;
     }
-    s->x = x;
-    s->y = y;
-    return true;
+    memcpy(s->x, x, sizeof(x));
+    memcpy(s->y, y, sizeof(y));
+    return n;
 }
 
 static void gt911_set_touch(Object *obj, const char *str, Error **errp)
 {
     GT911State *s = GT911(obj);
+    int n = strcmp(str, "up") ? gt911_parse_points(s, str, errp) : 0;
 
-    if (!strcmp(str, "up")) {
-        gt911_set_input(s, false, s->key);
-    } else if (gt911_parse_point(s, str, errp)) {
-        gt911_set_input(s, true, s->key);
+    if (n || !strcmp(str, "up")) {
+        gt911_set_input(s, n, s->key);
     }
 }
 
 static void gt911_set_tap(Object *obj, const char *str, Error **errp)
 {
     GT911State *s = GT911(obj);
+    int n = strcmp(str, "home") ? gt911_parse_points(s, str, errp) : 0;
 
     if (!strcmp(str, "home")) {
-        gt911_set_input(s, s->touch, true);
-    } else if (gt911_parse_point(s, str, errp)) {
-        gt911_set_input(s, true, s->key);
+        gt911_set_input(s, s->npts, true);
+    } else if (n) {
+        gt911_set_input(s, n, s->key);
     } else {
         return;
     }
@@ -272,7 +305,7 @@ static void gt911_set_tap(Object *obj, const char *str, Error **errp)
 
 static void gt911_tap_end(void *opaque)
 {
-    gt911_set_input(opaque, false, false);
+    gt911_set_input(opaque, 0, false);
 }
 
 static bool gt911_get_home(Object *obj, Error **errp)
@@ -284,7 +317,7 @@ static void gt911_set_home(Object *obj, bool value, Error **errp)
 {
     GT911State *s = GT911(obj);
 
-    gt911_set_input(s, s->touch, value);
+    gt911_set_input(s, s->npts, value);
 }
 
 static void gt911_load_regs(GT911State *s)
@@ -312,7 +345,7 @@ static void gt911_set_wires(GT911State *s, bool power, bool rst)
         /* Config self-loads and a finger still down is reported again */
         gt911_load_regs(s);
         qemu_irq_lower(s->irq);
-        s->changed = s->touch || s->key;
+        s->changed = s->npts || s->key;
         gt911_kick(s);
     }
 }
@@ -336,7 +369,7 @@ static void gt911_reset_hold(Object *obj, ResetType type)
     GT911State *s = GT911(obj);
 
     gt911_load_regs(s);
-    s->touch = false;
+    s->npts = 0;
     s->key = false;
     s->changed = false;
     timer_del(s->tap_timer);
@@ -376,6 +409,10 @@ static void gt911_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), &s->irq, "int", 1);
     qdev_init_gpio_in_named(DEVICE(obj), gt911_power_in, "power", 1);
     qdev_init_gpio_in_named(DEVICE(obj), gt911_rst_in, "rst", 1);
+    object_property_add_uint32_ptr(obj, "input-seq", &s->input_seq,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "read-seq", &s->read_seq,
+                                   OBJ_PROP_FLAG_READ);
 }
 
 static void gt911_class_init(ObjectClass *klass, void *data)

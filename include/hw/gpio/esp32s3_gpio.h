@@ -20,6 +20,8 @@
 /* Named GPIO out: input level of GPIO0..21 (the RTC pads) to the RTC controller for deep-sleep wake. */
 #define ESP32S3_GPIO_RTC_PAD "rtc-pad"
 #define ESP32S3_GPIO_RTC_PAD_COUNT 22
+/* IN reads closer together than this are one input sample (a busy-poll). */
+#define ESP32S3_GPIO_SAMPLE_NS (8 * 1000 * 1000)
 
 typedef struct ESP32S3State {
     SysBusDevice parent_obj;
@@ -37,4 +39,6 @@ typedef struct ESP32S3State {
     uint64_t last_in;
     uint64_t last_out;      /* last level sent on pin-out lines */
     uint32_t pin[ESP32S3_GPIO_COUNT];
+    uint32_t in_samples;    /* IN/IN1 reads, one per ESP32S3_GPIO_SAMPLE_NS */
+    int64_t last_sample_ns;
 } ESP32S3GPIOState;
