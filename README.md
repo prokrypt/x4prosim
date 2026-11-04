@@ -51,6 +51,10 @@ copies a folder of books in.
 touch. On the X3, Left/Right, Enter (Confirm) and Backspace (Back) are keys too.
 Monitor: `socat - unix:/tmp/x4prosim/NAME/mon.sock` (run.sh prints the instance dir; `X4NAME=name` picks it).
 
+**Browser view (phone, headless box):** `X4DISPLAY=none x4prosim/run.sh flash.bin sd.img`
+then `x4prosim/watch.py --bind 0.0.0.0` and open port 8404: live panel, tap/swipe on it,
+Up/Down/Power/Home buttons.
+
 **Headless / scripted:**
 ```sh
 x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png \
