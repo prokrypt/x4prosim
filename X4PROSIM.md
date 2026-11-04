@@ -166,6 +166,9 @@ Done on `x4prosim`:
 - X4 Pro uses `-icount shift=2` (set by `run.sh`/`drive.py`): guest time follows
   instructions, not host speed; without it FreeRTOS can assert after light sleep on a slow host.
   Guest runs slower than real time, so give `wait:` steps generous values.
+  `X4DET=1 x4prosim/drive.py ...` makes guest time independent of the host (`sleep=off`, RTC
+  fixed on the VM clock): CrossDink's `[BOOT] first ink` repeats to the ms run to run, a
+  regression tripwire for boot/book-open guest ms (not device ms: no flash/PSRAM cache cost).
 - `x4prosim/testdata/`: real device logs, the panel OTP dump, battery history to
   seed the SD card, estimated power numbers. See its README.
 - `hw/input/x4pro_keys.c`: Up/Down/Power keys (arrow keys + P, or
@@ -204,6 +207,11 @@ Done on `x4prosim`:
   trace into light-sleep residency, wakes per cause and the most common wake gaps
   (periodic wakers). `x4prosim/deepsleep-test.py` checks light and deep sleep
   over qtest. CrossDink 1101b logs `ls=0` in the sim and the counter agrees (0).
+  At each deep-sleep entry `esp32s3_rtc_deep_pads` traces the pads that hold their
+  level (RTC_CNTL PAD_HOLD for GPIO0..21, DIG_PAD_HOLD under DIG_ISO autohold for
+  GPIO22..48), which of them are held high, and the outputs left unheld (they float
+  in deep sleep); `sleepmeasure.py` lists them by GPIO. CrossDink 1101b: held high
+  1 2 5 14, held low/input 8 9, unheld outputs 4 11 12 13 18 19 20.
 - SD card: `x4prosim/mksd.py` makes an MBR + FAT32 image (SdFat needs the MBR);
   the existing `dwc_sdmmc` model mounts it. Size is a power of 2 MB, at least 64
   (QEMU refuses other sizes; smaller FAT32 reads as FAT16); several folders can be
@@ -229,6 +237,12 @@ Done on `x4prosim`:
   press/release is traced with the virtual time: `gt911_input t_us=.. touch= x= y= home=`
   and `x4pro_key t_us=.. key= down=`. Record a session by hand in the SDL window with
   `x4prosim/run.sh flash.bin sd.img -d trace:gt911_input,trace:x4pro_key -D rec.trace`.
+- `x4prosim/ota.py otadata flash.bin`: OTA slots, both otadata entries and the slot the
+  bootloader picks. `x4prosim/ota.py test flash.bin app.bin`: Wi-Fi OTA end to end on a
+  debug build (`/api/ota`): seeds wifi.json + `/debug/remote-token`, POSTs the app through a
+  hostfwd, checks the reply, otadata and the next boot's slot, then a corrupted new slot
+  (must fall back after a software reset; power-on skips validation by CrossDink's sdkconfig)
+  and a PENDING_VERIFY slot (reports whether the bootloader rolls back). ~6 min.
 - `x4prosim/sim.py`: scripted test runner. The USB-CDC console is a socket, so steps can
   send serial-remote commands (`cmd GOTO settings`, `cmd WAITIDLE 30000`; CrossDink
   debug builds) and wait for log lines (`waitlog Home 240`), besides `key`, `tap X,Y`,
@@ -456,7 +470,7 @@ Notes:
 | Area | Hardware | Pins / bus | Owner |
 | --- | --- | --- | --- |
 | Display | UC8179 800x480 1-bit e-ink over GPSPI2, 10 MHz; SDA also read bit-banged | SCLK 12, SDA 11, CS 13, DC 18, RST 14, BUSY_N 6 | done |
-| SD | SDMMC slot 1, 1-bit, 40 MHz; GPIO5 = power enable, active-LOW | CLK 41, CMD 42, D0 40 | done |
+| SD | SDMMC slot 1, 1-bit, 40 MHz; GPIO5 = power enable, active-LOW (card answers only while LOW; HIGH resets it; trace `dwc_sdmmc_card_power`) | CLK 41, CMD 42, D0 40 | done |
 | Buttons | active-LOW, pull-up; Up 0 (strap), Down 7, Power 3 | GPIO | done |
 | **I2C bus** | **ESP32-S3 I2C0 controller, 400 kHz** | **SDA 39, SCL 38** | done |
 | Touch | **GT911** at 0x5D (alt 0x14), INT 10, RST 4, power-enable GPIO2 active-LOW; reports X 0..480, Y 0..800 (portrait, firmware swaps XY and flips Y); has a capacitive Home key | on I2C | done |
