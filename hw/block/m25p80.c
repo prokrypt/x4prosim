@@ -230,6 +230,9 @@ static const FlashPartInfo known_devices[] = {
     { INFO("is25wp256",   0x9d7019,      0,  64 << 10, 512, ER_4K),
       .sfdp_read = m25p80_sfdp_is25wp256 },
 
+    /* XTX: QE is SR bit 9 (16-bit WRSR 01h, RDSR2 35h), no WRSR2 31h; X4 Pro flash */
+    { INFO("xt25f128b",   0x0b4018,      0,  64 << 10, 256, ER_4K) },
+
     /* Macronix */
     { INFO("mx25l2005a",  0xc22012,      0,  64 << 10,   4, ER_4K) },
     { INFO("mx25l4005a",  0xc22013,      0,  64 << 10,   8, ER_4K) },
@@ -468,6 +471,7 @@ typedef enum {
     MAN_SST,
     MAN_ISSI,
     MAN_GIGADEVICE,
+    MAN_XTX,
     MAN_GENERIC,
 } Manufacturer;
 
@@ -553,6 +557,8 @@ static inline Manufacturer get_man(Flash *s)
         return MAN_ISSI;
     case 0xC8:
     	return MAN_GIGADEVICE;
+    case 0x0B:
+        return MAN_XTX;
     default:
         return MAN_GENERIC;
     }
@@ -652,6 +658,7 @@ static void flash_erase(Flash *s, int offset, FlashCMD cmd)
     }
     memset(s->storage + offset, 0xff, len);
     flash_sync_area(s, offset, len);
+    s->write_enable = false;    /* WEL resets when an erase completes */
 }
 
 static inline void flash_sync_dirty(Flash *s, int64_t newpage)
@@ -821,6 +828,7 @@ static void complete_collecting_data(Flash *s)
             }
             break;
         case MAN_WINBOND:
+        case MAN_XTX:
             if (s->len > 1) {
                 s->quad_enable = !!(s->data[1] & 0x02);
             }
@@ -1025,6 +1033,7 @@ static void decode_fast_read_cmd(Flash *s)
                                     );
         break;
     case MAN_ISSI:
+    case MAN_XTX:   /* same dummy cycles as ISSI */
         /*
          * The Fast Read instruction code is followed by address bytes and
          * dummy cycles, transmitted via the SI line.
@@ -1080,6 +1089,7 @@ static void decode_dio_read_cmd(Flash *s)
         }
         break;
     case MAN_ISSI:
+    case MAN_XTX:   /* same dummy cycles as ISSI */
         /*
          * The Fast Read Dual I/O instruction code is followed by address bytes
          * and dummy cycles, transmitted via the IO1 and IO0 line.
@@ -1131,6 +1141,7 @@ static void decode_qio_read_cmd(Flash *s)
         }
         break;
     case MAN_ISSI:
+    case MAN_XTX:   /* same dummy cycles as ISSI */
         /*
          * The Fast Read Quad I/O instruction code is followed by address bytes
          * and dummy cycles, transmitted via the IO3, IO2, IO1 and IO0 line.
@@ -1295,6 +1306,7 @@ static void decode_new_cmd(Flash *s, uint32_t value)
             s->state = STATE_COLLECTING_VAR_LEN_DATA;
             break;
         case MAN_WINBOND:
+        case MAN_XTX:
             s->needed_bytes = 2;
             s->state = STATE_COLLECTING_VAR_LEN_DATA;
             break;
@@ -1500,6 +1512,7 @@ static void decode_new_cmd(Flash *s, uint32_t value)
             s->quad_enable = true;
             break;
         case MAN_WINBOND:
+        case MAN_XTX:
             s->data[0] = (!!s->quad_enable) << 1;
             s->pos = 0;
             s->len = 1;
@@ -1558,6 +1571,10 @@ static int m25p80_cs(SSIPeripheral *ss, bool select)
     if (select) {
         if (s->state == STATE_COLLECTING_VAR_LEN_DATA) {
             complete_collecting_data(s);
+        }
+        /* WEL resets when a page program completes (SST AAI keeps it until WRDI) */
+        if (s->state == STATE_PAGE_PROGRAM && !s->aai_enable) {
+            s->write_enable = false;
         }
         s->len = 0;
         s->pos = 0;
