@@ -25,6 +25,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/misc/esp32s3_reg.h"
 #include "hw/misc/esp32s3_rtc_cntl.h"
+#include "hw/gpio/esp32s3_gpio.h"
 #include "sysemu/runstate.h"
 #include "trace.h"
 
@@ -43,6 +44,9 @@ static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
 #define R_SLP_WAKEUP_CAUSE  0x130
 #define R_EXT_WAKEUP_CONF   0x64
 #define R_DIG_PWC           0x90
+#define R_DIG_ISO           0x94
+#define R_PAD_HOLD          0xD8
+#define R_DIG_PAD_HOLD      0xDC
 #define R_EXT_WAKEUP1       0xE0
 #define R_EXT_WAKEUP1_STATUS 0xE4
 #define STATE0_SLEEP_EN     BIT(31)
@@ -60,6 +64,10 @@ static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
 #define EXT_WAKEUP1_SEL     0x3fffff
 #define EXT_WAKEUP1_STATUS_CLR BIT(22)
 #define PADS_ALL            ((1u << ESP32S3_RTC_PAD_COUNT) - 1)
+#define DG_PAD_FORCE_HOLD   BIT(15)
+#define DG_PAD_FORCE_UNHOLD BIT(14)
+#define DG_PAD_AUTOHOLD_EN  BIT(11)
+#define DIG_PADS            MAKE_64BIT_MASK(22, 27)    /* GPIO22..48, DIG_PAD_HOLD bits 1..27 */
 
 static uint32_t esp32s3_rtc_wake_ena(Esp32s3RtcCntlState *s)
 {
@@ -77,12 +85,39 @@ static int64_t esp32s3_rtc_alarm_ns(Esp32s3RtcCntlState *s)
     return s->time_base_ns + muldiv64(target, NANOSECONDS_PER_SECOND, s->rtc_slowclk_freq);
 }
 
+/*
+ * Pads (bit = GPIO number) that keep their level through deep sleep: RTC pads
+ * 0..21 by PAD_HOLD (rtc_gpio_hold_en / gpio_hold_en), digital pads by
+ * DIG_PAD_HOLD once gpio_deep_sleep_hold_en set DG_PAD_AUTOHOLD_EN.
+ * shortcut: PWC PAD_FORCE_HOLD (hold every RTC pad) isn't read; add it if a firmware uses it.
+ */
+static uint64_t esp32s3_rtc_held_pads(Esp32s3RtcCntlState *s)
+{
+    uint64_t dig = ((uint64_t)s->dig_pad_hold << 21) & DIG_PADS;
+
+    if (s->dig_iso & DG_PAD_FORCE_HOLD) {
+        dig = DIG_PADS;
+    } else if (!(s->dig_iso & DG_PAD_AUTOHOLD_EN) || (s->dig_iso & DG_PAD_FORCE_UNHOLD)) {
+        dig = 0;
+    }
+    return (s->pad_hold & PADS_ALL) | dig;
+}
+
 static void esp32s3_rtc_trace_sleep(Esp32s3RtcCntlState *s, bool deep)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), alarm = esp32s3_rtc_alarm_ns(s);
 
     trace_esp32s3_rtc_sleep(now / SCALE_US, deep, esp32s3_rtc_wake_ena(s),
                             alarm < 0 ? -1 : (alarm - now) / SCALE_US);
+    /*
+     * Pads are isolated in deep sleep: a held output keeps its level, an
+     * unheld one floats (a rail enable left floating costs sleep current).
+     */
+    if (deep && s->gpio) {
+        uint64_t held = esp32s3_rtc_held_pads(s), oe = s->gpio->enable;
+
+        trace_esp32s3_rtc_deep_pads(held, held & oe & s->gpio->out_reg, oe & ~held);
+    }
 }
 
 /*
@@ -319,6 +354,9 @@ static uint64_t esp32s3_rtc_cntl_read(void *opaque, hwaddr addr, unsigned int si
     case R_SLP_WAKEUP_CAUSE: r = s->wakeup_cause; break;
     case R_EXT_WAKEUP_CONF:  r = s->ext_wakeup_conf; break;
     case R_DIG_PWC:          r = s->dig_pwc; break;
+    case R_DIG_ISO:          r = s->dig_iso; break;
+    case R_PAD_HOLD:         r = s->pad_hold; break;
+    case R_DIG_PAD_HOLD:     r = s->dig_pad_hold; break;
     case R_EXT_WAKEUP1:      r = s->ext_wakeup1; break;
     case R_EXT_WAKEUP1_STATUS: r = s->ext_wakeup1_status; break;
     case A_RTC_CNTL_OPTIONS0:
@@ -378,6 +416,9 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
     case R_WAKEUP_STATE: s->wakeup_state_reg = value; break;
     case R_EXT_WAKEUP_CONF: s->ext_wakeup_conf = value; break;
     case R_DIG_PWC:      s->dig_pwc = value; break;
+    case R_DIG_ISO:      s->dig_iso = value; break;
+    case R_PAD_HOLD:     s->pad_hold = value; break;
+    case R_DIG_PAD_HOLD: s->dig_pad_hold = value; break;
     case R_EXT_WAKEUP1:
         s->ext_wakeup1 = value & EXT_WAKEUP1_SEL;
         if (value & EXT_WAKEUP1_STATUS_CLR) {

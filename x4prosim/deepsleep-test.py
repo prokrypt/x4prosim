@@ -15,6 +15,8 @@ RTC, RTCIO = 0x60008000, 0x60008400
 SLP_TIMER0, SLP_TIMER1, STATE0, RESET_STATE, WAKEUP_STATE = 0x04, 0x08, 0x18, 0x38, 0x3C
 TIME_UPDATE, TIME0 = 0x0C, 0x10
 INT_RAW, INT_CLR = 0x44, 0x4C
+DIG_ISO, PAD_HOLD, DIG_PAD_HOLD = 0x94, 0xD8, 0xDC
+GPIO_BASE, GPIO_OUT, GPIO_OUT1, GPIO_ENABLE, GPIO_ENABLE1 = 0x60004000, 0x04, 0x10, 0x20, 0x2C
 EXT_WAKEUP_CONF, DIG_PWC, EXT_WAKEUP1, EXT_WAKEUP1_STATUS, WAKEUP_CAUSE = 0x64, 0x90, 0xE0, 0xE4, 0x130
 EXT0, EXT1, TIMER = 1, 2, 8
 GPIO = "/machine/soc/gpio"
@@ -29,7 +31,7 @@ class QTest:
         srv.listen(1)
         self.p = subprocess.Popen([qemu, "-machine", "x4pro", "-accel", "qtest", "-display", "none",
                                    "-qtest", f"unix:{sock}", "-qtest-log", "/dev/null", "-monitor", "none", "-serial", "null",
-                                   "-d", "trace:esp32s3_rtc_wake", "-D", TRACE],
+                                   "-d", "trace:esp32s3_rtc_wake,trace:esp32s3_rtc_deep_pads", "-D", TRACE],
                                   stdout=subprocess.DEVNULL)
         self.s, _ = srv.accept()
         srv.close()
@@ -85,6 +87,16 @@ try:
     q.w(RTC + INT_CLR, 1)
     print("ok  light sleep RTC timer")
 
+    # Held pads: GPIO2 (RTC pad hold) high, GPIO40 (digital hold + deep-sleep autohold) low;
+    # GPIO5 and GPIO13 are outputs left unheld. Traced on the first deep sleep below.
+    q.w(GPIO_BASE + GPIO_ENABLE, (1 << 2) | (1 << 5) | (1 << 13))
+    q.w(GPIO_BASE + GPIO_ENABLE1, 1 << (40 - 32))
+    q.w(GPIO_BASE + GPIO_OUT, (1 << 2) | (1 << 5))
+    q.w(RTC + PAD_HOLD, 1 << 2)
+    q.w(RTC + DIG_PAD_HOLD, 1 << (40 - 21))
+    q.w(RTC + DIG_ISO, 1 << 11)
+    assert q.r(RTC + PAD_HOLD) == 1 << 2, "PAD_HOLD read back"
+
     # ext1, any low on GPIO3 (Power): nothing until the pad drops, then GPIO3 in the status.
     q.w(RTC + EXT_WAKEUP1, 1 << 3)
     q.w(RTC + EXT_WAKEUP_CONF, 0)
@@ -117,7 +129,11 @@ try:
     print("ok  RTC counter advanced by the sleep")
 finally:
     q.close()
-wakes = [l.split(" deep=")[1].split()[:2] for l in open(TRACE) if "esp32s3_rtc_wake" in l]
+lines = open(TRACE).read().splitlines()
+pads = [l.split("esp32s3_rtc_deep_pads ")[1] for l in lines if "esp32s3_rtc_deep_pads" in l]
+assert pads[0] == f"held=0x{(1 << 2) | (1 << 40):x} held_high=0x4 unheld_out=0x{(1 << 5) | (1 << 13):x}", f"pads: {pads[0]}"
+print("ok  held pads traced")
+wakes = [l.split(" deep=")[1].split()[:2] for l in lines if "esp32s3_rtc_wake" in l]
 os.unlink(TRACE)
 assert wakes == [["0", "cause=0x8"], ["1", "cause=0x2"], ["1", "cause=0x1"], ["1", "cause=0x8"]], f"trace: wakes {wakes}"
 print("ok  wakes traced")
