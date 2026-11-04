@@ -87,7 +87,7 @@ keeps the image unchanged (every run cold, book open measured from scratch);
 
 `firmware.elf` beside you for symbols. To find a hang: run with `-s -S`, attach
 `xtensa-esp32s3-elf-gdb firmware.elf` (`target remote :1234`), let it run, Ctrl-C,
-`bt`. Or `info registers -a` on the HMP socket `/tmp/x4prosim-mon.sock` and
+`bt`. Or `info registers -a` on the HMP socket `/tmp/x4prosim/NAME/mon.sock` (run.sh prints it) and
 `xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <PC>`.
 
 Unmapped peripheral registers read as 0 and ignore writes (catch-all
@@ -230,6 +230,15 @@ Done on `x4prosim`:
   at the dark start and over the dark window, lit ms, early and late ms. The OTP
   (Half/Full) waveforms are stand-ins, so only their duck's presence is meaningful;
   register-LUT refreshes (gray, DU paint) play their real frames.
+- Instances: `run.sh` puts `mon.sock` (HMP), `qmp.sock` (QMP) and `log.txt` (firmware log
+  copy) in `/tmp/x4prosim/$X4NAME` (default: its pid; printed at start), so several sims
+  run side by side. `X4DISPLAY=none` runs it without the SDL window. Host tools reach an
+  instance through `x4prosim/x4qmp.py` (one QMP connection per call, so tools share it;
+  no NAME = the newest live instance).
+- Replay: `x4prosim/replay.py rec.trace [NAME]` plays a recorded input journal (below)
+  into a running instance at the recorded guest times (board state `uptime_us`), or
+  shifted to now if the instance is already past them. Checked: a 9-event journal
+  replayed from boot landed within 3 ms guest of the recording.
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`

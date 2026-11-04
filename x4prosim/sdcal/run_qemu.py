@@ -11,20 +11,10 @@ import sys
 import time
 
 sim, out = map(Path, sys.argv[1:])
-env = dict(os.environ, X4MACHINE='x3', X4NET='-nic user,model=esp32_wifi')
-# The upstream launcher hardcodes a shared monitor socket. Use a local copy
-# with no monitor or GUI so this run cannot disturb another emulator.
-launcher = (sim / 'x4prosim/run.sh').read_text()
-for old, new in [
-    ('here=$(cd "$(dirname "$0")/.." && pwd)', 'here=' + shlex.quote(str(sim))),
-    ('-monitor unix:/tmp/x4prosim-mon.sock,server,nowait', '-monitor none'),
-    ('-display sdl,show-cursor=on', '-display none'),
-]:
-    if launcher.count(old) != 1:
-        raise SystemExit('Unrecognized simulator launcher: ' + old)
-    launcher = launcher.replace(old, new)
-(out / 'run.sh').write_text(launcher)
-command = ['sh', str(out / 'run.sh'), str(out / 'flash.bin'), str(out / 'sd.img')] + shlex.split(os.environ.get('SD_TIMING_EXTRA', ''))
+# run.sh gives each run its own instance dir; no window, so it cannot disturb another emulator.
+env = dict(os.environ, X4MACHINE='x3', X4NET='-nic user,model=esp32_wifi', X4DISPLAY='none',
+           X4NAME='sdcal-%d' % os.getpid())
+command = ['sh', str(sim / 'x4prosim/run.sh'), str(out / 'flash.bin'), str(out / 'sd.img')] + shlex.split(os.environ.get('SD_TIMING_EXTRA', ''))
 process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            env=env, start_new_session=True)
 selector = selectors.DefaultSelector()

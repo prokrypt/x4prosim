@@ -49,7 +49,7 @@ copies a folder of books in.
 
 **Controls:** arrow keys are Up/Down and `P` is Power. Click in the window to
 touch. On the X3, Left/Right, Enter (Confirm) and Backspace (Back) are keys too.
-Monitor: `socat - unix:/tmp/x4prosim-mon.sock`.
+Monitor: `socat - unix:/tmp/x4prosim/NAME/mon.sock` (run.sh prints the instance dir; `X4NAME=name` picks it).
 
 **Headless / scripted:**
 ```sh
