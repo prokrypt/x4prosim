@@ -2,10 +2,11 @@ name: 'build'
 
 on: [push, pull_request]
 
-# x4prosim: a newer push to the same branch or PR cancels the older run
+# x4prosim: a newer push to the same PR cancels the older run; pushes to a branch
+# (each merge to x4prosim) all finish, so every merged head gets a full result.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
 
@@ -203,6 +204,15 @@ jobs:
           name: dist-qemu-${{ matrix.target }}-${{ matrix.platform }}
           path: |
             dist/
+
+  # One required check for the branch ruleset: green only when every Build job is.
+  Build-status:
+    name: Build status
+    if: always()
+    needs: [ Build ]
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.Build.result }}" = success
 
   Upload:
     if: startsWith(github.ref, 'refs/tags/')
