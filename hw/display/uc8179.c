@@ -45,9 +45,6 @@
  * the vendor gray LUT's levels at even steps.
  * Other commands (power, booster, PLL, VCOM, temperature setting) are
  * accepted and ignored.
- * Trace uc8179_cmd logs every command on the bus with its data length and
- * first 8 data bytes, like the SDK's FREEINK_EPD_TRACE device log, so
- * x4prosim/epdtrace.py can diff the two command streams.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -517,7 +514,11 @@ static void uc8179_data(Uc8179State *s, uint8_t v)
     }
 }
 
-/* Traces the pending command with its data length and first 8 bytes. */
+/*
+ * Trace uc8179_cmd: the pending command with its data length and first 8 data
+ * bytes, the record the SDK's FREEINK_EPD_TRACE device log prints, so
+ * x4prosim/epdtrace.py can diff the two command streams.
+ */
 static void uc8179_trace_flush(Uc8179State *s)
 {
     if (s->tr_cmd >= 0 && trace_event_get_state_backends(TRACE_UC8179_CMD)) {
