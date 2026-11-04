@@ -159,7 +159,12 @@ Done on `x4prosim`:
   again, `SLP_WAKEUP_CAUSE` and `EXT_WAKEUP1_STATUS` give the cause and pads. The
   GPIO model feeds GPIO0..21 to it on `rtc-pad` lines. RTC memory, the RTC counter
   (advanced by the time asleep) and the wake registers survive the reset. A timer
-  wake sleeps its length in host time. `info status` shows `paused (suspended)`
+  wake sleeps its length in host time;
+  `-global driver=misc.esp32s3.rtc_cntl,property=deep-timer-skip,value=true` wakes a
+  timer-only deep sleep at once and adds the alarm time to the RTC counter (the
+  guest's clock across the reset), so "sleep 10 min, auto wake" tests take no host
+  time. With it no pad can wake the sleep first, and the BM8563 doesn't see the
+  skipped time. `info status` shows `paused (suspended)`
   while asleep. Checked with CrossDink 1014a: Power sleeps, a short press wakes
   and re-sleeps, a held press boots to Home with `reset=DEEPSLEEP wake=EXT1`.
 - Sleep observability (same file): every sleep entry and wake is traced
