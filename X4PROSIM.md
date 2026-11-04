@@ -249,6 +249,7 @@ Done on `x4prosim`:
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+  The NIC is on by default (NAT, host :8080 -> device :80; `X4NET` overrides as in run.sh).
 - `x4prosim/ota.py otadata flash.bin`: OTA slots, both otadata entries and the slot the
   bootloader picks. `x4prosim/ota.py test flash.bin app.bin`: Wi-Fi OTA end to end on a
   debug build (`/api/ota`): seeds wifi.json + `/debug/remote-token`, POSTs the app through a

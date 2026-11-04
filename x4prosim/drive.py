@@ -11,7 +11,9 @@ The machine follows the image's chip (X4MACHINE=x3|x4pro overrides).
 X4DET=1: deterministic guest time (icount sleep=off, RTC fixed at 2026-01-01 on the VM clock),
 so boot/open ms in the log repeat across runs and host load; idle guest time then runs ahead
 of the host, so wait: steps cover more guest time.
-The firmware log (USB-CDC) goes to log.txt.
+The firmware log (USB-CDC) goes to log.txt. For serial-remote steps (cmd, waitlog) use sim.py.
+Wi-Fi: a user-mode NIC as run.sh (host :8080 -> device :80), so Wi-Fi calls don't wait ~5 s for a
+missing radio; X4NET="-nic ..." replaces it, X4NET="" drops it.
 SD: X4SD=snapshot discards the run's SD writes (cold caches every run); X4SD=none boots with no card."""
 import os, socket, subprocess, sys, time
 
@@ -28,6 +30,7 @@ battery_props = {"soc": "cw2017 soc", "frac": "cw2017 soc-frac", "mv": "cw2017 v
                  "temp": "cw2017 temp-c", "drain": "cw2017 drain-pct-per-h",
                  "charging": "x4pro-keys charging", "usb": "soc/jtag host-connected"}
 sock = f"/tmp/x4prosim-{os.getpid()}.sock"
+net = os.environ.get("X4NET", "-nic user,model=esp32_wifi,hostfwd=tcp::8080-:80").split()
 sdopt = {"": "if=sd", "snapshot": "if=sd,snapshot=on", "none": "if=none"}.get(os.environ.get("X4SD", ""))
 if not sdopt:
     sys.exit("X4SD=snapshot|none")
@@ -43,7 +46,7 @@ p = subprocess.Popen([qemu, "-machine", machine,
                       "-drive", f"file={img}.run,if=mtd,format=raw", "-drive", f"file={sd},{sdopt},format=raw",
                       "-chardev", f"file,id=cdc,path={log}",
                       "-global", "driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc",
-                      "-monitor", f"unix:{sock},server,nowait"]
+                      "-monitor", f"unix:{sock},server,nowait"] + net
                      + (["-rtc", "base=2026-01-01T00:00:00,clock=vm"] if det else []) + os.environ.get("QEMU_EXTRA", "").split(),
                      stdout=subprocess.DEVNULL, stderr=sys.stderr)
 for _ in range(50):
