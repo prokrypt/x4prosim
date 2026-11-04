@@ -235,6 +235,13 @@ Done on `x4prosim`:
   run side by side. `X4DISPLAY=none` runs it without the SDL window. Host tools reach an
   instance through `x4prosim/x4qmp.py` (one QMP connection per call, so tools share it;
   no NAME = the newest live instance).
+- Live view: `x4prosim/watch.py [NAME] [--port 8404] [--bind 0.0.0.0]` serves the panel
+  in a browser (stdlib only): status line (uptime, sleep, refresh count and waveform,
+  BUSY, light %, battery), press/drag on the picture = finger (swipes), Up/Down/Power/Home
+  buttons hold while pressed, arrows/P/H on a keyboard. Picture fetched only when the board
+  state changes (every poll while a refresh animates); each fetch also writes
+  `last.png` in the instance dir. Works with the SDL window open, or headless
+  (`X4DISPLAY=none`) on a cloud box over an SSH tunnel.
 - Replay: `x4prosim/replay.py rec.trace [NAME]` plays a recorded input journal (below)
   into a running instance at the recorded guest times (board state `uptime_us`), or
   shifted to now if the instance is already past them. Checked: a 9-event journal
