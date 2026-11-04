@@ -26,6 +26,7 @@
 #include "hw/misc/esp32s3_reg.h"
 #include "hw/misc/esp32s3_rtc_cntl.h"
 #include "sysemu/runstate.h"
+#include "trace.h"
 
 static void esp32s3_rtc_update_cpu_stall(Esp32s3RtcCntlState* s);
 static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
@@ -65,6 +66,25 @@ static uint32_t esp32s3_rtc_wake_ena(Esp32s3RtcCntlState *s)
     return (s->wakeup_state_reg >> 15) & 0x1ffff;
 }
 
+/* Virtual time of the armed RTC timer alarm, or -1 when the timer can't wake. */
+static int64_t esp32s3_rtc_alarm_ns(Esp32s3RtcCntlState *s)
+{
+    uint64_t target = s->slp_timer[0] | ((uint64_t)(s->slp_timer[1] & 0xffff) << 32);
+
+    if (!(esp32s3_rtc_wake_ena(s) & WAKE_TIMER) || !(s->slp_timer[1] & SLP_TIMER1_ALARM_EN)) {
+        return -1;
+    }
+    return s->time_base_ns + muldiv64(target, NANOSECONDS_PER_SECOND, s->rtc_slowclk_freq);
+}
+
+static void esp32s3_rtc_trace_sleep(Esp32s3RtcCntlState *s, bool deep)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), alarm = esp32s3_rtc_alarm_ns(s);
+
+    trace_esp32s3_rtc_sleep(now / SCALE_US, deep, esp32s3_rtc_wake_ena(s),
+                            alarm < 0 ? -1 : (alarm - now) / SCALE_US);
+}
+
 /*
  * Deep-sleep pad sources at their wake level: ext0 is one pad (RTC_IO
  * EXT_WAKEUP0 SEL) at EXT_WAKEUP0_LV; ext1 is any selected pad high (LV 1)
@@ -90,14 +110,17 @@ static uint32_t esp32s3_rtc_pads_awake(Esp32s3RtcCntlState *s, uint32_t *ext1_pa
 /* Deep sleep ends in a reset: the ROM boots again and reports DEEPSLEEP_RESET plus the cause. */
 static void esp32s3_rtc_deep_wake(Esp32s3RtcCntlState *s, uint32_t cause, uint32_t ext1_pads)
 {
+    int64_t slept = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s->deep_start_rt_ns + s->deep_skipped_ns;
+
     if (!s->sleeping) {
         return;
     }
     s->sleeping = false;
     timer_del(&s->sleep_timer);
     timer_del(&s->deep_timer);
+    trace_esp32s3_rtc_wake(qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), true, cause, slept / SCALE_US);
     /* The RTC counter kept running while the VM (and the virtual clock) was suspended. */
-    s->time_base_ns -= qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - s->deep_start_rt_ns;
+    s->time_base_ns -= slept;
     /*
      * The SoC reset doesn't reach this device (the RTC domain keeps its
      * registers and counter), so end the sleep state here.
@@ -122,17 +145,28 @@ static void esp32s3_rtc_start_deep_sleep(Esp32s3RtcCntlState *s)
     uint32_t ext1_pads, cause = esp32s3_rtc_pads_awake(s, &ext1_pads);
 
     s->sleeping = true;
+    s->deep_sleeps++;
     s->deep_start_rt_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    s->deep_skipped_ns = 0;
+    esp32s3_rtc_trace_sleep(s, true);
     if (cause) {
         esp32s3_rtc_deep_wake(s, cause, ext1_pads);
         return;
     }
-    if ((esp32s3_rtc_wake_ena(s) & WAKE_TIMER) && (s->slp_timer[1] & SLP_TIMER1_ALARM_EN)) {
-        uint64_t target = s->slp_timer[0] | ((uint64_t)(s->slp_timer[1] & 0xffff) << 32);
-        int64_t left = s->time_base_ns + muldiv64(target, NANOSECONDS_PER_SECOND, s->rtc_slowclk_freq)
-                       - qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (esp32s3_rtc_alarm_ns(s) >= 0) {
+        int64_t left = esp32s3_rtc_alarm_ns(s) - qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         /* Too short to bother suspending (and racing the suspend request). */
         if (left < SCALE_MS) {
+            esp32s3_rtc_deep_wake(s, WAKE_TIMER, 0);
+            return;
+        }
+        /*
+         * deep-timer-skip: wake at once and count the whole alarm on the RTC
+         * counter (the guest's only clock across the reset), so a long timer
+         * sleep takes no host time. Pads can't wake it first.
+         */
+        if (s->deep_timer_skip) {
+            s->deep_skipped_ns = left;
             esp32s3_rtc_deep_wake(s, WAKE_TIMER, 0);
             return;
         }
@@ -179,11 +213,16 @@ static const MemoryRegionOps esp32s3_rtcio_ext0_ops = {
 
 static void esp32s3_rtc_wake(Esp32s3RtcCntlState *s, uint32_t cause)
 {
+    int64_t slept;
+
     if (!s->sleeping) {
         return;
     }
     s->sleeping = false;
     timer_del(&s->sleep_timer);
+    slept = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->sleep_start_ns;
+    s->light_sleep_us += slept / SCALE_US;
+    trace_esp32s3_rtc_wake(qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), false, cause, slept / SCALE_US);
     if (s->sleep_cpu) {
         s->sleep_cpu->halted = 0;
         qemu_cpu_kick(s->sleep_cpu);
@@ -194,7 +233,7 @@ static void esp32s3_rtc_wake(Esp32s3RtcCntlState *s, uint32_t cause)
      * but IDF also advances it by the RTC-measured sleep time. Hide the sleep
      * from the RTC counter so the time is only counted once.
      */
-    s->time_base_ns += qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->sleep_start_ns;
+    s->time_base_ns += slept;
     s->state0_reg &= ~STATE0_SLEEP_EN;
     s->wakeup_cause = cause;
     s->int_raw |= INT_SLP_WAKEUP;
@@ -228,19 +267,19 @@ static void esp32s3_rtc_start_sleep(Esp32s3RtcCntlState *s)
         esp32s3_rtc_start_deep_sleep(s);
         return;
     }
-    uint32_t ena = (s->wakeup_state_reg >> 15) & 0x1ffff;
-    bool timer = (ena & WAKE_TIMER) && (s->slp_timer[1] & SLP_TIMER1_ALARM_EN);
+    uint32_t ena = esp32s3_rtc_wake_ena(s);
+    int64_t target_ns = esp32s3_rtc_alarm_ns(s);
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     s->sleeping = true;
     s->sleep_start_ns = now;
+    s->light_sleeps++;
+    esp32s3_rtc_trace_sleep(s, false);
     if ((ena & WAKE_GPIO) && s->gpio_wake) {
         esp32s3_rtc_wake_at(s, WAKE_GPIO, now);
         return;
     }
-    if (timer) {
-        uint64_t target = s->slp_timer[0] | ((uint64_t)(s->slp_timer[1] & 0xffff) << 32);
-        int64_t target_ns = s->time_base_ns + muldiv64(target, NANOSECONDS_PER_SECOND, s->rtc_slowclk_freq);
+    if (target_ns >= 0) {
         /*
          * Wake a little early: TCG runs the sleep entry/exit code slower than
          * silicon, and FreeRTOS asserts if the measured sleep overshoots the
@@ -505,6 +544,11 @@ static void esp32s3_rtc_cntl_init(Object *obj)
     timer_init_ns(&s->deep_timer, QEMU_CLOCK_REALTIME, esp32s3_rtc_deep_timer_cb, s);
     qemu_system_wakeup_enable(QEMU_WAKEUP_REASON_OTHER, true);
     s->pad_level = PADS_ALL;
+    /* Counters since QEMU started (an SoC reset keeps them): qom-get /machine/soc/rtc_cntl light-sleeps */
+    object_property_add_uint32_ptr(obj, "light-sleeps", &s->light_sleeps, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "light-sleep-us", &s->light_sleep_us, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "deep-sleeps", &s->deep_sleeps, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "wake-cause", &s->wakeup_cause, OBJ_PROP_FLAG_READ);
 
     for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
         s->reset_cause[i] = ESP32_POWERON_RESET;
@@ -520,6 +564,7 @@ static void esp32s3_rtc_cntl_init(Object *obj)
 }
 
 static Property esp32s3_rtc_cntl_properties[] = {
+    DEFINE_PROP_BOOL("deep-timer-skip", Esp32s3RtcCntlState, deep_timer_skip, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
