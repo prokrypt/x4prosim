@@ -173,9 +173,17 @@ Done on `x4prosim`:
   at the dark start and over the dark window, lit ms, early and late ms. The OTP
   (Half/Full) waveforms are stand-ins, so only their duck's presence is meaningful;
   register-LUT refreshes (gray, DU paint) play their real frames.
-- `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
-  `shot:file.png`, `hmp:cmd`). Example:
+- `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[+up][:ms]`,
+  `boot:down[:ms]`, `tap:X,Y[:ms]`, `tap:home`, `swipe:X0,Y0:X1,Y1[:ms]`,
+  `touch:X,Y[;X,Y]`, `touch:up`, `shot:file.png`, `hmp:cmd`; full list in
+  its docstring). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+  On the X4 Pro every hold is guest time and lasts until the guest has seen the input,
+  from read-only counters: `qom-get /machine/soc/gpio in-samples` (IN reads, at most one
+  per 8 ms guest), `/machine/gt911 input-seq` / `read-seq` (input changes / last change
+  the guest read and cleared) and `/machine/x4pro-keys vclock-ms` (guest clock). A
+  loaded host no longer drops presses; input the guest never saw prints a warning.
+  `boot:` starts the VM paused (`-S`) so a key is down from power-on.
 
 - GDMA (AES, SHA) uses the system address space, so guest DRAM and PSRAM addresses
   resolve. It was rooted at the DRAM region (address 0 = 0x3FC80000), every transfer
