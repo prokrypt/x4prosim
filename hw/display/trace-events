@@ -184,6 +184,8 @@ macfb_update_mode(uint32_t width, uint32_t height, uint8_t depth) "setting mode 
 # uc8179.c
 uc8179_refresh(int64_t t_us, int frames, int reg, uint32_t frame_us) "t_us=%" PRId64 " frames=%d reg=%d frame_us=%u"
 uc8179_frame(int64_t t_us, int frame, uint32_t white_e4) "t_us=%" PRId64 " frame=%d white_e4=%u"
+uc8179_lut_dc(int64_t t_us, int frames, int kk, int kw, int wk, int ww) "t_us=%" PRId64 " frames=%d net KK=%d KW=%d WK=%d WW=%d"
+uc8179_dc(int64_t t_us, int worst) "t_us=%" PRId64 " worst pixel net drive=%d frames"
 
 # uc8279.c
 uc8279_refresh(int vcom_frames, int ww_frames, int bw_frames, int wb_frames, int bb_frames, uint8_t pll, uint64_t busy_ms) "frames vcom=%d ww=%d bw=%d wb=%d bb=%d pll=0x%02x busy_ms=%" PRIu64
