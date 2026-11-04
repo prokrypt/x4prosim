@@ -6,7 +6,8 @@ steps:  wait:SECONDS     press:KEY[:MS]     shot:FILE.png
         hmp:COMMAND      (any monitor command, output printed)
 KEY: up|down|power on the X4 Pro; back|confirm|left|right|up|down|power on the X3.
 The machine follows the image's chip (X4MACHINE=x3|x4pro overrides).
-The firmware log (USB-CDC) goes to log.txt."""
+The firmware log (USB-CDC) goes to log.txt.
+SD: X4SD=snapshot discards the run's SD writes (cold caches every run); X4SD=none boots with no card."""
 import os, socket, subprocess, sys, time
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +20,9 @@ if not os.path.exists(qemu):    # release archives have the binaries in bin/
     qemu = os.path.join(here, "..", "bin", os.path.basename(qemu))
 keys = "x3-keys" if machine == "x3" else "x4pro-keys"
 sock = f"/tmp/x4prosim-{os.getpid()}.sock"
+sdopt = {"": "if=sd", "snapshot": "if=sd,snapshot=on", "none": "if=none"}.get(os.environ.get("X4SD", ""))
+if not sdopt:
+    sys.exit("X4SD=snapshot|none")
 if not os.path.exists(sd):
     subprocess.run([sys.executable, os.path.join(here, "mksd.py"), sd], check=True)
 subprocess.run(["cp", img, img + ".run"], check=True)
@@ -27,7 +31,7 @@ icount_shift = 0 if machine == "x3" else 2
 p = subprocess.Popen([qemu, "-machine", machine,
                       "-icount", f"shift={icount_shift},sleep=on",
                       "-display", "none", "-serial", "null",
-                      "-drive", f"file={img}.run,if=mtd,format=raw", "-drive", f"file={sd},if=sd,format=raw",
+                      "-drive", f"file={img}.run,if=mtd,format=raw", "-drive", f"file={sd},{sdopt},format=raw",
                       "-chardev", f"file,id=cdc,path={log}",
                       "-global", "driver=misc.esp32s3.usb_serial_jtag,property=chardev,value=cdc",
                       "-monitor", f"unix:{sock},server,nowait"] + os.environ.get("QEMU_EXTRA", "").split(),
