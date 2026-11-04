@@ -46,7 +46,10 @@ Firmware image: any 16 MB X4 Pro flash image. Three ways to get one:
   (works only if the device doesn't use flash encryption).
 - A PlatformIO or ESP-IDF build: `x4prosim/mkflash.sh <build dir> flash.bin` merges
   `bootloader.bin`, `partitions.bin` and the app (`firmware.bin`, or the only other
-  `.bin`) at 0x0/0x8000/0x10000.
+  `.bin`) at 0x0/0x8000/0x10000. `--factory` swaps in the X4 Pro factory partition table
+  (0x7E0000 app slots, 80 KB spiffs, what the device runs) plus an otadata booting app0, for
+  OTA, slot-size and rollback tests. `--base flash.bin.run` writes the new build over a run's
+  image instead of an erased one, so NVS, otadata and the SD-independent state survive.
 - A single app `.bin` released as an OTA update: flash a bootloader and partition
   table first (from any build), then the app at 0x10000.
 
