@@ -125,6 +125,11 @@ Done on `x4prosim`:
     (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23 WK, 0x24 KK); REG=0 runs stand-ins for the
     OTP waveforms (bodies never dumped): fast inside PTIN/PTOUT, full otherwise.
     CDI N2OCP copies NEW to OLD after the refresh.
+  - Addressing: PSR UD/SHL pick the gate/source scan direction (a wrong PSR
+    shows mirrored or shifted). A PTL (0x90) window inside PTIN/PTOUT confines
+    DTM writes and the refresh to it and logs a guest error (`-d guest_errors`)
+    when visible pixels are left undriven: the "no partial-window upload" gate.
+    Self-test without firmware: `x4prosim/paneltest.py` (qtest, ~2 s).
   - Per pixel: saturating particle motion, two-component remnant voltage,
     blooming (edge loss), drift toward gray, shown linear in L*. Defaults are
     fitted to device photos: a typed-then-deleted word leaves ~11% ghost (device
@@ -306,7 +311,7 @@ Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
   command/address/dummy phases, and half-duplex reads on SDA.
 - GPIO matrix / IO_MUX routing: pins are wired directly, so a peripheral routed to
   a different pin than the X4 Pro's won't reach the device.
-- UC8179: the 0x90 partial window, LUTBD (0x25), VDHR, VCOM_DC value and
+- UC8179: PTL's PT_SCAN bit, LUTBD (0x25), VDHR, VCOM_DC value and
   temperature (TSSET) aren't modeled; the OTP waveforms are stand-ins until the
   full 0xA2 OTP is dumped.
   Open calibration items: `x4prosim/ghosting/README.md` section 8.
