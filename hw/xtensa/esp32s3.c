@@ -272,7 +272,7 @@ static void esp32s3_init_spi_flash(Esp32s3SocState *ms, BlockBackend* blk)
             flash_model = "gd25q64";
             break;
         case 16 * MB:
-            flash_model = "is25lp128";
+            flash_model = "xt25f128b";   /* X4 Pro: XTX XT25F128B, JEDEC 0x0b4018 */
             break;
         default:
             error_report("Drive size error: only 2, 4, 8, and 16MB images are supported");
