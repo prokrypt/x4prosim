@@ -192,6 +192,10 @@ Done on `x4prosim`:
 - GDMA (AES, SHA) uses the system address space, so guest DRAM and PSRAM addresses
   resolve. It was rooted at the DRAM region (address 0 = 0x3FC80000), every transfer
   failed, and AES-DMA left the guest spinning in `aes_hal_wait_done` on any HTTPS handshake.
+- AES-DMA CTR builds its counter blocks per AES_INC_SEL (INC32 wraps the low word without a
+  carry, as IDF's GCM expects); OFB encryption leaves the last keystream block in IV memory.
+  `x4prosim/tests/test_crypto.py` checks AES (every mode) and SHA-DMA against host AES/hashlib
+  over qtest, DRAM and PSRAM buffers (needs python `cryptography`; CI runs it).
 - Wi-Fi: the MAC is emulated with a fake AP bridged to a QEMU NIC (port of the
   lcgamboa ESP32-C3 model: `hw/misc/esp32s3_wifi.c`, `esp32_wifi_ap.c`,
   `esp32_wlan_packet.c`; analog/FE in `esp32s3_ana.c`, `esp32_fe.c`). `run.sh`
