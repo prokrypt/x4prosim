@@ -118,6 +118,11 @@ struct Uc8179State {
     bool asleep;
     bool busy;
     uint8_t cmd;
+    /* command trace: the command on the bus, its start and data bytes so far */
+    int tr_cmd;             /* -1: none pending */
+    int64_t tr_t_us;
+    uint32_t tr_len;
+    uint8_t tr_head[8];
     uint32_t pos;           /* byte index into the plane or LUT being written, or read index */
     uint8_t psr;            /* PSR byte 0 */
     uint8_t cdi;            /* CDI byte 0 */
@@ -544,8 +549,42 @@ static void uc8179_data(Uc8179State *s, uint8_t v)
     }
 }
 
+/*
+ * Trace uc8179_cmd: the pending command with its data length and first 8 data
+ * bytes, the record the SDK's FREEINK_EPD_TRACE device log prints, so
+ * x4prosim/epdtrace.py can diff the two command streams.
+ */
+static void uc8179_trace_flush(Uc8179State *s)
+{
+    if (s->tr_cmd >= 0 && trace_event_get_state_backends(TRACE_UC8179_CMD)) {
+        char hex[2 * sizeof(s->tr_head) + 1] = "";
+        for (uint32_t i = 0; i < MIN(s->tr_len, sizeof(s->tr_head)); i++) {
+            snprintf(hex + 2 * i, 3, "%02x", s->tr_head[i]);
+        }
+        trace_uc8179_cmd(s->tr_t_us, s->tr_cmd, s->tr_len, hex);
+    }
+    s->tr_cmd = -1;
+}
+
+/* Every byte on the bus, accepted or not, as the device-side EPD trace sees it. */
+static void uc8179_trace_byte(Uc8179State *s, uint8_t v)
+{
+    if (!s->dc) {
+        uc8179_trace_flush(s);
+        s->tr_cmd = v;
+        s->tr_t_us = qemu_clock_get_us(QEMU_CLOCK_VIRTUAL);
+        s->tr_len = 0;
+    } else if (s->tr_cmd >= 0) {
+        if (s->tr_len < sizeof(s->tr_head)) {
+            s->tr_head[s->tr_len] = v;
+        }
+        s->tr_len++;
+    }
+}
+
 static void uc8179_byte(Uc8179State *s, uint8_t v)
 {
+    uc8179_trace_byte(s, v);
     if (s->in_reset || s->asleep) {
         return;
     }
@@ -648,6 +687,7 @@ static void uc8179_set_rst(void *opaque, int n, int level)
 {
     Uc8179State *s = UC8179(opaque);
     if (!level) {
+        uc8179_trace_flush(s);
         s->in_reset = true;
         /* the panel stops being driven mid-refresh */
         timer_del(&s->anim_timer);
@@ -727,6 +767,7 @@ static void uc8179_realize(SSIPeripheral *d, Error **errp)
         }
     }
     memset(s->ram, 0xff, sizeof(s->ram));
+    s->tr_cmd = -1;
     if (!s->swing) {
         error_setg(errp, "uc8179: swing-frames must be at least 1");
         return;

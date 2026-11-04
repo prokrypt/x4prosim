@@ -143,6 +143,11 @@ Done on `x4prosim`:
     ~0.3 s), slow it: `-global uc8179.frame-us=100000`. A DRF during playback
     finishes the previous refresh first; RST stops it where it is.
   - Ink state is 16 B/pixel (6 MB) and the frame loop runs on QEMU's main loop.
+  - Command stream parity: `-d trace:uc8179_cmd` logs every panel command with
+    its data length and first 8 data bytes. Against a device log from firmware
+    built with `-DFREEINK_EPD_TRACE=1` (freeink-sdk EpdBus),
+    `x4prosim/epdtrace.py device.log sim.trace --from-cmd 0x00` prints both
+    streams side by side and exits 1 at the first opcode or length mismatch.
   - Measure: `test/*-steps.txt` replay a scenario with `drive.py`,
     `tools/pepmeasure.py` / `seqmeasure.py` / `hist.py` read the screenshots,
     `tools/photomeasure.py` the device photos.
