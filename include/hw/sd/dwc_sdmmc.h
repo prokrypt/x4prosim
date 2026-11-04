@@ -50,6 +50,8 @@ typedef struct DWCSDMMCState {
     uint32_t idsts;
 
     size_t bytes_left;
+    /* Config registers the model only stores (CLKDIV, CTYPE, TMOUT, FIFOTH, BMOD...). */
+    uint32_t regs[0x120 / 4];
 
 
 } DWCSDMMCState;

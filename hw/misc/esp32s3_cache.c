@@ -133,13 +133,12 @@ static uint64_t esp32s3_cache_read(void *opaque, hwaddr addr, unsigned int size)
         case A_EXTMEM_DCACHE_CTRL:
             r = s->dcache_enable;
             break;
+        /* CTRL1 holds the bus-shut bits (ROM Cache_Resume clears them), not an enable */
         case A_EXTMEM_DCACHE_CTRL1:
-            r = s->dcache_enable;
+        case A_EXTMEM_ICACHE_CTRL1:
+            r = s->regs[index];
             break;
         case A_EXTMEM_ICACHE_CTRL:
-            r = s->icache_enable;
-            break;
-        case A_EXTMEM_ICACHE_CTRL1:
             r = s->icache_enable;
             break;
         /* For the following registers, mark the bit as done only if the feature was enabled */
@@ -222,13 +221,7 @@ static void esp32s3_cache_write(void *opaque, hwaddr addr, uint64_t value,
             case A_EXTMEM_DCACHE_CTRL:
                 s->dcache_enable = value & 1;
                 break;
-            case A_EXTMEM_DCACHE_CTRL1:
-                s->dcache_enable = value & 1;
-                break;
             case A_EXTMEM_ICACHE_CTRL:
-                s->icache_enable = value & 1;
-                break;
-            case A_EXTMEM_ICACHE_CTRL1:
                 s->icache_enable = value & 1;
                 break;
             case A_EXTMEM_ICACHE_FREEZE:
