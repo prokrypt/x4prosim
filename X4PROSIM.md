@@ -176,6 +176,9 @@ Done on `x4prosim`:
 - `x4prosim/drive.py`: headless runner with steps (`wait:S`, `press:down[:ms]`,
   `shot:file.png`, `hmp:cmd`). Example:
   `x4prosim/drive.py flash.bin sd.img log.txt wait:30 press:down shot:home.png`
+  The console is a socket chardev (log still lands in log.txt), so `send:CMD:PING` and
+  `waitlog:REGEX[:S]` drive the serial remote; the NIC is on by default (NAT, host :8080 ->
+  device :80, `X4NET` overrides as in run.sh).
 
 - GDMA (AES, SHA) uses the system address space, so guest DRAM and PSRAM addresses
   resolve. It was rooted at the DRAM region (address 0 = 0x3FC80000), every transfer
