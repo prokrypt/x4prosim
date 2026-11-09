@@ -46,6 +46,7 @@ struct Esp32s3LedcState {
     MemoryRegion iomem;
     uint32_t regs[LEDC_REGS_SIZE / 4];
     uint32_t level[LEDC_CHANNELS];     /* latched output, in duty steps */
+    uint32_t frac[LEDC_CHANNELS];      /* duty[3:0]: 16ths of a step (dithered over 16 cycles) */
     uint32_t max[LEDC_CHANNELS];       /* steps at 100% when latched */
 };
 
@@ -55,17 +56,20 @@ static void ledc_latch(Esp32s3LedcState *s, int ch)
     uint32_t timer = s->regs[LEDC_TIMER0_CONF / 4 + 2 * (conf0 & CONF0_TIMER_SEL)];
     uint32_t res = timer & TIMER_DUTY_RES;
     uint32_t max = res ? (1u << res) : 1;
-    uint32_t level;
+    uint32_t level, frac = 0;
 
     if (conf0 & CONF0_SIG_OUT_EN) {
-        level = MIN(s->regs[(ch * LEDC_CH_STRIDE + LEDC_CH_DUTY) / 4] >> DUTY_FRAC_BITS, max);
+        uint32_t duty = s->regs[(ch * LEDC_CH_STRIDE + LEDC_CH_DUTY) / 4];
+        level = MIN(duty >> DUTY_FRAC_BITS, max);
+        frac = level < max ? duty & ((1u << DUTY_FRAC_BITS) - 1) : 0;
     } else {
         level = conf0 & CONF0_IDLE_LV ? max : 0;
     }
-    if (level != s->level[ch] || max != s->max[ch]) {
+    if (level != s->level[ch] || frac != s->frac[ch] || max != s->max[ch]) {
         s->level[ch] = level;
+        s->frac[ch] = frac;
         s->max[ch] = max;
-        trace_esp32s3_ledc_duty(qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), ch, level, max);
+        trace_esp32s3_ledc_duty(qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), ch, level, max, frac);
     }
 }
 
@@ -75,7 +79,7 @@ static uint64_t ledc_read(void *opaque, hwaddr addr, unsigned int size)
     int ch = addr / LEDC_CH_STRIDE;
 
     if (addr < LEDC_CHANNELS * LEDC_CH_STRIDE && addr % LEDC_CH_STRIDE == LEDC_CH_DUTY_R) {
-        return s->level[ch] << DUTY_FRAC_BITS;
+        return s->level[ch] << DUTY_FRAC_BITS | s->frac[ch];
     }
     if (addr == LEDC_DATE) {
         return 0x2003310;   /* ledc_struct.h default */
