@@ -14,17 +14,23 @@ Per flash: light at the dark start and its mean over the window, as % of the
 light before the duck; "lit ms" = window time weighted by how far the light is
 above its lowest level (0 = dark the whole flash); "early ms" = light below half
 before the window starts (the dim shows on a still screen); "late ms" = from the
-window's end until the light is back above half (negative: up while still dark)."""
+window's end until the light is back above half (negative: up while still dark);
+"step%" = the largest single light change within 2 s of the window, relative to
+the dimmer side (a visible stair is ~2% and up). frac= (duty dither, 16ths of a
+step) counts when the trace has it."""
 import bisect, re, sys
 
 ledc, frames = {}, []
 light = []      # (t_us, total duty fraction) after each change
 for line in open(sys.argv[1], errors="replace"):
-    m = re.search(r"esp32s3_ledc_duty t_us=(\d+) ch=(\d+) level=(\d+) max=(\d+)", line)
+    m = re.search(r"esp32s3_ledc_duty t_us=(\d+) ch=(\d+) level=(\d+) max=(\d+)(?: frac=(\d+))?", line)
     if m:
-        t, ch, lv, mx = map(int, m.groups())
-        ledc[ch] = lv / mx
-        light.append((t, sum(ledc.values())))
+        t, ch, lv, mx = map(int, m.groups()[:4])
+        ledc[ch] = (lv + int(m[5] or 0) / 16) / mx
+        if light and t - light[-1][0] < 200:    # one write per channel: count it as one change
+            light[-1] = (light[-1][0], sum(ledc.values()))
+        else:
+            light.append((t, sum(ledc.values())))
         continue
     m = re.search(r"uc8179_frame t_us=(\d+) frame=(-?\d+) white_e4=(\d+)", line)
     if m:
@@ -55,7 +61,7 @@ for t, f, w in frames:
     elif cur is not None:
         cur.append((t, w))
 
-print("start_ms   dip  dark_ms  light@dark  mean  lit_ms  early_ms  late_ms")
+print("start_ms   dip  dark_ms  light@dark  mean  lit_ms  early_ms  late_ms  step%")
 for r in refreshes:
     ws = [w for _, w in r]
     dip = min(ws[0], ws[-1]) - min(ws)
@@ -83,5 +89,9 @@ for r in refreshes:
     early = (start - dim) / 1e3 if dim is not None else float("nan")
     up = next((t for t in range(end, end + 3_000_000, 1000) if light_at(t) >= (ref + lo) / 2), None)
     late = (up - end) / 1e3 if up is not None else float("nan")
+    near = [lv for t, lv in light if start - 2_000_000 <= t <= end + 2_000_000]
+    near = [light_at(start - 2_000_000)] + near
+    step = max([abs(b - a) / min(a, b) for a, b in zip(near, near[1:]) if min(a, b) > 0] + [0])
     print(f"{r[0][0] / 1e3:9.0f}  {before - low:.2f}  {(end - start) / 1e3:6.0f}  "
-          f"{100 * light_at(start) / ref:8.0f}%  {100 * mean / ref:3.0f}%  {lit:6.0f}  {early:8.0f}  {late:7.0f}")
+          f"{100 * light_at(start) / ref:8.0f}%  {100 * mean / ref:3.0f}%  {lit:6.0f}  {early:8.0f}  {late:7.0f}  "
+          f"{100 * step:5.1f}")

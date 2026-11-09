@@ -374,4 +374,4 @@ esp32s3_rtc_deep_pads(uint64_t held, uint64_t held_high, uint64_t unheld_out) "h
 esp32s3_rtc_wake(int64_t t_us, int deep, uint32_t cause, int64_t slept_us) "t_us=%" PRId64 " deep=%d cause=0x%x slept_us=%" PRId64
 
 # esp32s3_ledc.c
-esp32s3_ledc_duty(int64_t t_us, unsigned ch, unsigned level, unsigned max) "t_us=%" PRId64 " ch=%u level=%u max=%u"
+esp32s3_ledc_duty(int64_t t_us, unsigned ch, unsigned level, unsigned max, unsigned frac) "t_us=%" PRId64 " ch=%u level=%u max=%u frac=%u"
