@@ -143,3 +143,7 @@ config DM163
 
 config ESP_RGB
     bool
+
+config UC8279
+    bool
+    depends on SSI

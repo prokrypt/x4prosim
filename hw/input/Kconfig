@@ -5,6 +5,10 @@ config GT911
     bool
     depends on I2C
 
+config GSLX680
+    bool
+    depends on I2C
+
 config PCKBD
     bool
     select PS2

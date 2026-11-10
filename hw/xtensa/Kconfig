@@ -47,5 +47,8 @@ config XTENSA_ESP32S3
     select BM8563
     select CW2017
     select GT911
+    select SSI_SD
+    select UC8279
+    select GSLX680
 
 
