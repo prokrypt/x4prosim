@@ -352,6 +352,24 @@ Gaps another firmware is likely to hit (CrossDink doesn't need them yet):
   Open calibration items: `x4prosim/ghosting/README.md` section 8.
 - Flash encryption and secure boot.
 
+## EEGO Reader A4 (`-machine eegoa4`, ESP32-S3)
+
+Runs the unmodified CrossPoint `eego_a4` build (freeink-sdk `BoardConfig.h`
+`EEGO_A4`) to Home. Pick it with `X4MACHINE=eegoa4` (the image's chip says S3,
+which defaults to `x4pro`). Octal PSRAM 8 MB as on the X4 Pro.
+
+| Area | Hardware | Pins / bus | Model |
+| --- | --- | --- | --- |
+| Display | UC8279C 768x552 on 768x600 RAM, streamed bottom-up, not probed | GPSPI2: SCLK 42, MOSI 45, CS 21, DC 14, RST 13, BUSY_N 41 | `hw/display/uc8279.c` with `width=768,height=552` |
+| SD | SPI mode on its own bus, SdFat | GPSPI3: SCLK 39, MISO 40, MOSI 38, CS 47 | `ssi-sd` + `sd-card-spi`, `-drive if=sd` |
+| Keys | Up 5, Down 7 active-low; Power 8 active-high; charger STAT 11 | GPIO | `x4pro-keys` at the same QOM path, so drive.py `press:` works |
+| Touch | GSLX680 at 0x40, firmware uploaded at boot | I2C0 SDA 2, SCL 1 | `hw/input/gslx680.c`: takes the upload, reads "loaded", reports no touches |
+| RTC | PCF8563 at 0x51 | I2C0 | `bm8563` (same register set) |
+
+Not modeled: CW2015 gauge (0x62; the firmware falls back to the GPIO10 ADC and
+shows 0%) and the LM3630A frontlight (0x36; absent = the unlit variant). The
+glass is drawn rectangular; the device's rounded corners are not masked.
+
 ## Xteink X3 (`-machine x3`, ESP32-C3)
 
 The X3 is a different SoC: ESP32-C3 (RISC-V, 400 KB SRAM, no PSRAM), so it is a

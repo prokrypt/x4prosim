@@ -125,6 +125,7 @@ config RISCV_ESP32C3
     select BQ27220
     select DS3231
     select QMI8658
+    select UC8279
 
 config RISCV_ESP32C6
     bool

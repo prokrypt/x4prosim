@@ -7,7 +7,7 @@ steps:  wait:SECONDS     press:KEY[:MS]     shot:FILE.png
         battery:NAME=VALUE,...   (X4 Pro) soc=% frac=1/256% mv= temp=C
                  drain=%/h (negative charges) charging=0|1 usb=0|1 (host on USB)
 KEY: up|down|power on the X4 Pro; back|confirm|left|right|up|down|power on the X3.
-The machine follows the image's chip (X4MACHINE=x3|x4pro overrides).
+The machine follows the image's chip (X4MACHINE=x3|x4pro|eegoa4 overrides).
 X4DET=1: deterministic guest time (icount sleep=off, RTC fixed at 2026-01-01 on the VM clock),
 so boot/open ms in the log repeat across runs and host load; idle guest time then runs ahead
 of the host, so wait: steps cover more guest time.

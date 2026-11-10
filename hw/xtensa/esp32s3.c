@@ -32,6 +32,7 @@
 #include "hw/xtensa/esp32s3_intc.h"
 
 #include "hw/sd/dwc_sdmmc.h"
+#include "hw/sd/sd.h"
 #include "hw/misc/ssi_psram.h"
 #include "core-esp32s3/core-isa.h"
 #include "qemu/datadir.h"
@@ -327,6 +328,7 @@ struct Esp32s3MachineState {
 };
 #define TYPE_ESP32S3_MACHINE MACHINE_TYPE_NAME("esp32s3")
 #define TYPE_X4PRO_MACHINE MACHINE_TYPE_NAME("x4pro")
+#define TYPE_EEGOA4_MACHINE MACHINE_TYPE_NAME("eegoa4")
 
 static void esp32s3_init_openeth(Esp32s3SocState *ms)
 {
@@ -611,6 +613,7 @@ static void esp32s3_soc_add_unimp_device(MemoryRegion *dest, const char* name, h
 }
 
 static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2);
+static void eegoa4_board_init(Esp32s3SocState *ss, DeviceState *spi2);
 
 static void esp32s3_machine_init(MachineState *machine)
 {
@@ -882,8 +885,9 @@ static void esp32s3_machine_init(MachineState *machine)
         memory_region_add_subregion_overlap(sys_mem, DR_REG_AES_XTS_BASE, mr, 0);
     }
 
-    /* RGB display realization; the X4 Pro has its own panel, keep it console 0 */
-    if (object_dynamic_cast(OBJECT(machine), TYPE_X4PRO_MACHINE)) {
+    /* RGB display realization; the boards have their own panel, keep it console 0 */
+    bool eegoa4 = object_dynamic_cast(OBJECT(machine), TYPE_EEGOA4_MACHINE);
+    if (eegoa4 || object_dynamic_cast(OBJECT(machine), TYPE_X4PRO_MACHINE)) {
         object_unparent(OBJECT(&ss->rgb));
     } else {
         /* Give the internal RAM memory region to the display */
@@ -1012,14 +1016,17 @@ static void esp32s3_machine_init(MachineState *machine)
                            qdev_get_gpio_in(intmatrix_dev, ETS_SPI2_INTR_SOURCE));
         if (object_dynamic_cast(OBJECT(machine), TYPE_X4PRO_MACHINE)) {
             x4pro_board_init(ss, spi2);
+        } else if (eegoa4) {
+            eegoa4_board_init(ss, spi2);
         }
     }
 
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.rmt", DR_REG_RMT_BASE, 0x1000);
     esp32s3_soc_add_unimp_device(sys_mem, "esp32s3.iomux", DR_REG_IO_MUX_BASE, 0x2000);
 
-    
-    esp32s3_machine_init_sd(ss);
+    if (!eegoa4) {      /* the EEGO A4 card is on SPI3 (eegoa4_board_init) */
+        esp32s3_machine_init_sd(ss);
+    }
 
     /* Need MMU initialized prior to ELF loading,
      * so that ELF gets loaded into virtual addresses
@@ -1209,6 +1216,79 @@ static void x4pro_board_init(Esp32s3SocState *ss, DeviceState *spi2)
     object_property_add_str(qdev_get_machine(), "state", x4pro_get_state, NULL);
 }
 
+/*
+ * EEGO Reader A4 (freeink-sdk BoardConfig EEGO_A4): UC8279C 768x552 panel on
+ * GPSPI2 (SCLK 42, MOSI 45, CS 21, DC 14, RST 13, BUSY_N 41), SD card in SPI
+ * mode on GPSPI3 (SCLK 39, MISO 40, MOSI 38, CS 47), Up 5 / Down 7 active-low,
+ * Power 8 active-high, charger STAT GPIO11 (high = charging), PCF8563 RTC
+ * (BM8563 is register-compatible) at 0x51 and the GSLX680 touch at 0x40 (takes
+ * its firmware, reports no touches) on I2C0 (SDA 2, SCL 1). Not modeled: the
+ * CW2015 gauge 0x62 (the firmware falls back to the GPIO10 ADC) and the
+ * LM3630A frontlight 0x36 (absent = the unlit variant).
+ */
+static void eegoa4_board_init(Esp32s3SocState *ss, DeviceState *spi2)
+{
+    MemoryRegion *sys_mem = get_system_memory();
+    DeviceState *gpio = DEVICE(&ss->gpio);
+    DeviceState *panel = qdev_new("uc8279");
+
+    qdev_prop_set_uint32(panel, "width", 768);
+    qdev_prop_set_uint32(panel, "height", 552);
+    qdev_set_id(panel, g_strdup("panel"), &error_fatal);
+    ssi_realize_and_unref(panel, (SSIBus *)qdev_get_child_bus(spi2, "spi"), &error_fatal);
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 21, qdev_get_gpio_in_named(panel, SSI_GPIO_CS, 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 14, qdev_get_gpio_in_named(panel, "dc", 0));
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 13, qdev_get_gpio_in_named(panel, "rst", 0));
+    qdev_connect_gpio_out_named(panel, "busy", 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 41));
+    qemu_set_irq(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 41), 1);
+
+    DeviceState *spi3 = qdev_new("ssi.esp32s3.gpspi");
+    object_property_add_child(OBJECT(ss), "spi3", OBJECT(spi3));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(spi3), &error_fatal);
+    memory_region_add_subregion_overlap(sys_mem, DR_REG_SPI3_BASE,
+                                        sysbus_mmio_get_region(SYS_BUS_DEVICE(spi3), 0), 1);
+    sysbus_connect_irq(SYS_BUS_DEVICE(spi3), 0,
+                       qdev_get_gpio_in(DEVICE(&ss->intmatrix), ETS_SPI3_INTR_SOURCE));
+    DeviceState *sd = qdev_new("ssi-sd");
+    ssi_realize_and_unref(sd, (SSIBus *)qdev_get_child_bus(spi3, "spi"), &error_fatal);
+    qdev_connect_gpio_out_named(gpio, ESP32S3_GPIO_OUT, 47, qdev_get_gpio_in_named(sd, SSI_GPIO_CS, 0));
+    DriveInfo *dinfo = drive_get(IF_SD, 0, 0);
+    DeviceState *card = qdev_new(TYPE_SD_CARD_SPI);
+    qdev_prop_set_drive_err(card, "drive", dinfo ? blk_by_legacy_dinfo(dinfo) : NULL, &error_fatal);
+    qdev_realize_and_unref(card, qdev_get_child_bus(sd, "sd-bus"), &error_fatal);
+
+    /* same model and QOM path as the X4 Pro's, so drive.py's key steps work */
+    DeviceState *keys = qdev_new("x4pro-keys");
+    object_property_add_child(qdev_get_machine(), "x4pro-keys", OBJECT(keys));
+    qdev_connect_gpio_out(keys, 0, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 5));
+    qdev_connect_gpio_out(keys, 1, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 7));
+    qdev_connect_gpio_out(keys, 2, qemu_irq_invert(qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 8)));
+    qdev_connect_gpio_out(keys, 3, qdev_get_gpio_in_named(gpio, ESP32S3_GPIO_IN, 11));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(keys), &error_fatal);
+
+    DeviceState *i2c0 = DEVICE(object_resolve_path_component(OBJECT(ss), "i2c0"));
+    I2CBus *i2c = I2C_BUS(qdev_get_child_bus(i2c0, "i2c"));
+    x4pro_add_i2c(i2c, "gslx680", 0x40);
+    x4pro_add_i2c(i2c, "bm8563", 0x51);
+}
+
+static void eegoa4_machine_class_init(ObjectClass *oc, void *data)
+{
+    static GlobalProperty eegoa4_globals[] = {
+        { "ssi_psram", "is_octal", "true" },
+    };
+    MachineClass *mc = MACHINE_CLASS(oc);
+    mc->desc = "EEGO Reader A4 (ESP32-S3 N16R8, UC8279C e-paper)";
+    mc->default_ram_size = 8 * MiB;
+    compat_props_add(mc->compat_props, eegoa4_globals, ARRAY_SIZE(eegoa4_globals));
+}
+
+static const TypeInfo eegoa4_info = {
+    .name = TYPE_EEGOA4_MACHINE,
+    .parent = TYPE_ESP32S3_MACHINE,
+    .class_init = eegoa4_machine_class_init,
+};
+
 static void x4pro_machine_class_init(ObjectClass *oc, void *data)
 {
     static GlobalProperty x4pro_globals[] = {
@@ -1249,6 +1329,7 @@ static void esp32s3_machine_type_init(void)
 {
     type_register_static(&esp32s3_info);
     type_register_static(&x4pro_info);
+    type_register_static(&eegoa4_info);
 }
 
 type_init(esp32s3_machine_type_init);

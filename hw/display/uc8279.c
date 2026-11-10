@@ -1,7 +1,9 @@
 /*
  * UltraChip UC8279d (or UC8253) e-paper controller on the Xteink X3: 792x528
  * glass on an 800x600 controller, 3-wire SPI where SDA (MOSI) doubles as the
- * read line, DC/RST on GPIO, BUSY_N on GPIO (low = busy).
+ * read line, DC/RST on GPIO, BUSY_N on GPIO (low = busy). "width"/"height"
+ * set the glass: the EEGO A4's UC8279C (same command set, 7-byte LUT groups)
+ * is 768x552, also streamed bottom-up, and is never probed.
  *
  * Bytes arrive from the SPI controller (SSI bus) and, for the firmware's
  * controller probe, as bit-banged SCL/SDA edges on GPIO. The VER (0x70) read
@@ -52,8 +54,6 @@
 #define TYPE_UC8279 "uc8279"
 OBJECT_DECLARE_SIMPLE_TYPE(Uc8279State, UC8279)
 
-#define W 792                   /* glass */
-#define H 528
 #define RAM_W 800               /* controller RAM */
 #define RAM_H 600
 #define RAM_WB (RAM_W / 8)
@@ -72,6 +72,7 @@ struct Uc8279State {
     QEMUTimer busy_timer;
     bool uc8253;
     bool portrait;
+    uint32_t width, height; /* glass, inside the controller RAM */
     uint32_t busy_ms;       /* fixed DRF BUSY time; 0 = the LUT's frames */
     uint32_t frame_us;
     uint32_t refresh_overhead_us;
@@ -105,7 +106,7 @@ struct Uc8279State {
     uint32_t rd_len;
 
     uint8_t ram[2][RAM_H][RAM_WB];
-    float *ink;             /* H x W, 0 black .. 1 white */
+    float *ink;             /* height x width, 0 black .. 1 white */
     bool redraw;
 };
 
@@ -172,12 +173,12 @@ static int uc8279_refresh(Uc8279State *s, int row_frames[LUT_ROWS])
         frames = MAX(frames, row_frames[r]);
     }
     /* The driver streams framebuffer row H-1-i into RAM row i. */
-    for (int y = 0; y < H; y++) {
-        int r = H - 1 - y;
-        for (int x = 0; x < W; x++) {
+    for (int y = 0; y < s->height; y++) {
+        int r = s->height - 1 - y;
+        for (int x = 0; x < s->width; x++) {
             int o = (s->ram[PLANE_OLD][r][x / 8] >> (7 - x % 8)) & 1;
             int nw = (s->ram[PLANE_NEW][r][x / 8] >> (7 - x % 8)) & 1;
-            float *p = &s->ink[y * W + x];
+            float *p = &s->ink[y * s->width + x];
             if (lut) {
                 *p = MIN(1.0f, MAX(0.0f, *p + move[row_of[o << 1 | nw]]));
             } else {
@@ -472,11 +473,11 @@ static void uc8279_update_display(void *opaque)
     s->redraw = false;
     uint32_t *d = (uint32_t *)surface_data(surface);
     int stride = surface_stride(surface) / 4;
-    for (int y = 0; y < H; y++) {
-        for (int x = 0; x < W; x++) {
+    for (int y = 0; y < s->height; y++) {
+        for (int x = 0; x < s->width; x++) {
             /* panel white is a light gray, black a dark one */
-            uint8_t g = 0x10 + (int)(s->ink[y * W + x] * 0xE0 + 0.5f);
-            int dx = s->portrait ? H - 1 - y : x, dy = s->portrait ? x : y;
+            uint8_t g = 0x10 + (int)(s->ink[y * s->width + x] * 0xE0 + 0.5f);
+            int dx = s->portrait ? s->height - 1 - y : x, dy = s->portrait ? x : y;
             d[dy * stride + dx] = rgb_to_pixel32(g, g, g);
         }
     }
@@ -502,15 +503,19 @@ static void uc8279_realize(SSIPeripheral *d, Error **errp)
         error_setg(errp, "uc8279: swing-frames must be at least 1");
         return;
     }
+    if (!s->width || !s->height || s->width > RAM_W || s->height > RAM_H) {
+        error_setg(errp, "uc8279: width/height must fit the %dx%d RAM", RAM_W, RAM_H);
+        return;
+    }
     memset(s->ram, 0xff, sizeof(s->ram));
-    s->ink = g_new(float, H * W);
-    for (int i = 0; i < H * W; i++) {
+    s->ink = g_new(float, s->height * s->width);
+    for (int i = 0; i < s->height * s->width; i++) {
         s->ink[i] = 1;
     }
     uc8279_reset_regs(s);
     s->redraw = true;
     s->con = graphic_console_init(dev, 0, &uc8279_ops, s);
-    qemu_console_resize(s->con, s->portrait ? H : W, s->portrait ? W : H);
+    qemu_console_resize(s->con, s->portrait ? s->height : s->width, s->portrait ? s->width : s->height);
     timer_init_us(&s->busy_timer, QEMU_CLOCK_VIRTUAL, uc8279_busy_done, s);
     qdev_init_gpio_in_named(dev, uc8279_set_dc, "dc", 1);
     qdev_init_gpio_in_named(dev, uc8279_set_rst, "rst", 1);
@@ -523,6 +528,8 @@ static void uc8279_realize(SSIPeripheral *d, Error **errp)
 static Property uc8279_properties[] = {
     DEFINE_PROP_BOOL("uc8253", Uc8279State, uc8253, false),
     DEFINE_PROP_BOOL("portrait", Uc8279State, portrait, true),
+    DEFINE_PROP_UINT32("width", Uc8279State, width, 792),
+    DEFINE_PROP_UINT32("height", Uc8279State, height, 528),
     DEFINE_PROP_UINT32("busy-ms", Uc8279State, busy_ms, 0),
     DEFINE_PROP_UINT32("frame-us", Uc8279State, frame_us, 20000),
     DEFINE_PROP_UINT32("refresh-overhead-us", Uc8279State,
