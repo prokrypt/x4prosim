@@ -20,7 +20,9 @@
  * frames' duration, or "busy-ms" if set.
  *  - PSR (0x00) REG=1: the register LUTs (0x20 VCOM, 0x21 WW, 0x22 KW, 0x23
  *    WK, 0x24 KK; 6-byte groups [levels, TP_A..TP_D, RP]); drive = source -
- *    VCOM, VDH -> black, VDL -> white. VDHR (11) on a source row is not modeled.
+ *    VCOM, VDH -> black, VDL -> white. VDHR (11) on a source row is not modeled
+ *    (guest error: the DC ledger can't score it); a floating VCOM (11) frame
+ *    drives nothing.
  *  - REG=0, OTP waveform (bodies not dumped): inside PTIN/PTOUT (0x91/0x92)
  *    changed pixels get "otp-fast-frames" toward
  *    NEW and held ones a weak "otp-hold-drive" (per mille) toward their own
@@ -246,7 +248,7 @@ static int uc8179_lut_frames(Uc8179State *s)
     static const int level[4] = { 0, 1, -1, 0 };    /* GND, VDH, VDL, VDHR/float: + toward black */
     static const int row_of[4] = { 4, 2, 3, 1 };    /* class: KK, KW, WK, WW */
     LutCursor c[LUT_ROWS];
-    bool vdhr = false;
+    bool vdhr = false, vcom_float = false;
     int n = 0;
 
     for (int r = 0; r < LUT_ROWS; r++) {
@@ -265,16 +267,23 @@ static int uc8179_lut_frames(Uc8179State *s)
             qemu_log_mask(LOG_GUEST_ERROR, "uc8179: LUT over %d frames, cut\n", MAX_FRAMES);
             break;
         }
+        /* VCOM 11 floats the common electrode: no path for DC through the cell (inferred), so no drive. */
+        bool floating = l[0] == 3;
+        vcom_float |= floating;
         for (int k = 0; k < 4; k++) {
             int r = row_of[k];
-            vdhr |= l[r] == 3;
-            s->frames[n][k] = level[l[0]] - level[l[r]];
+            vdhr |= !floating && l[r] == 3;
+            s->frames[n][k] = floating ? 0 : level[l[0]] - level[l[r]];
         }
         s->frames[n][4] = 0;
         n++;
     }
+    if (vcom_float) {
+        qemu_log_mask(LOG_UNIMP, "uc8179: floating VCOM frames scored as undriven\n");
+    }
     if (vdhr) {
-        qemu_log_mask(LOG_UNIMP, "uc8179: VDHR in a LUT row not modeled\n");
+        /* The VDHR rail level (PWR byte 5) is not modeled, so the DC ledger below can't score this LUT. */
+        qemu_log_mask(LOG_GUEST_ERROR, "uc8179: VDHR in a LUT row: DC balance unchecked (scored as 0 V)\n");
     }
     return n;
 }
